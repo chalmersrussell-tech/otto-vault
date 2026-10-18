@@ -1,4 +1,8 @@
-# Using the OttoVault inbox (`otto_add.py`)
+# Using OttoVault with an AI assistant
+
+OttoVault is built so an AI assistant can help you with logins, **with your per-entry permission**: for a service you approve, the assistant can retrieve its username and password (`otto_get.py`) and use or paste them for you, and it can add new logins to your vault (`otto_add.py`, below). It never sees your master password, you can revoke access at any time, and every release is logged. Read the security notes at the end before enabling it.
+
+# Part 1 - AI adds a login: the inbox (`otto_add.py`)
 
 The inbox lets a helper program or person leave you a **new** entry **without
 knowing your master password and without reading your vault**.
@@ -43,7 +47,7 @@ and no `.bad` files) and the entry appears in the list.
 
 ---
 
-# AI access to approved passwords (`otto_get.py`) - new in 1.2
+# Part 2 - AI uses an approved login (`otto_get.py`)
 
 Lets an AI assistant (or other automation helper) retrieve the password of **specific services
 you approved**, without asking each time, **only while OttoVault is unlocked**.

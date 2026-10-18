@@ -1,7 +1,14 @@
-OTTOVAULT 1.3.2 - a free password manager that lives only on your PC
-================================================================
+OTTOVAULT 1.3.2 - the free password manager your AI assistant can use
+=====================================================================
+A free password manager that lives only on your PC, built so an AI
+assistant can help you with logins: for each service YOU approve, the AI
+can fetch the username and password and use them for you - without ever
+seeing your master password. You can revoke any time, approvals can expire,
+and every grant and release is written to a tamper-evident log.
+
 No cloud. No internet use. No account. No subscription. No tracking.
 Your passwords are stored in one encrypted file on this computer.
+Also: import from KeePass 1 (.kdb), KeePass 2 XML, OttoVault XML and CSV.
 
 !!  YOUR MASTER PASSWORD CANNOT BE RECOVERED.  !!
 If you forget it, your passwords are gone. Nobody (not even the person who

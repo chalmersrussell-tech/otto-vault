@@ -1,22 +1,33 @@
 > **Please read first.** OttoVault is a **homemade hobby project. It has not been independently security-audited and comes with no warranty** (see `LICENSE`). **Do not make it your only copy of your passwords.** Keep an established password manager or your existing vault until you have tested this thoroughly, keep encrypted backups, and remember that a forgotten master password **cannot be recovered**.
 
-# Free Password Manager
+# OttoVault - the free password manager your AI assistant can use (with your permission)
 
-An idea for a **free, open password manager that anyone can use or self-host**, with encrypted storage on the person's own device.
+**A free, local, encrypted password manager built so an AI assistant can actually help you with logins.** You decide, entry by entry, which services your AI assistant may use. For an approved service it can fetch the username and password and use them (log in, fill a form, paste them where needed) - without ever seeing your master password. Everything else stays locked.
 
-## Why
-Good password managers are usually subscriptions, and many people skip them and reuse weak passwords. This project is about making a simple, free option for everyday people, with no account, no subscription and no cloud required.
+## What makes it different: AI access, with your permission
+- **You approve each service.** Tick "Allow AI access to this password" on an entry (for example your email login). Nothing is shared by default; imported or AI-added entries start unapproved.
+- **The AI gets only what you approved.** An assistant using `otto_get.py` can request that service's username and password from the running, unlocked app. It never receives your master password or any entry you did not approve. Requests and answers go through an encrypted mailbox on your own computer.
+- **Revoke any time.** Untick one entry, or use Settings > "Revoke all AI access approvals...". Approvals can also expire on their own (never / 7 / 30 days; new approvals default to 30).
+- **Every grant, revoke and release is logged** in a tamper-evident access log inside the encrypted vault (File > "AI access log...").
+- **Your master password is never stored.** Lock the vault and the AI gets nothing (no answer while locked).
+- **The AI can add logins too.** `otto_add.py` lets an assistant drop a *new* entry into your vault (encrypted to the vault's public key) without any access to existing entries; you review it and decide whether to approve it.
+- **It is a deliberate trade-off, stated plainly:** while the vault is unlocked, any program running as the same Windows user could also file requests for the entries you approved. Approve only what you want automated and lock the vault when away. See "Security notes" below and `OTTO_USAGE.md`.
+
+## Also
+- **Free, local, encrypted.** One encrypted file on your PC (Argon2id or Scrypt key derivation + AES-256-GCM, vetted libraries only). No account, no subscription, no cloud, no telemetry, no network calls.
+- **A normal, simple password manager too:** add/edit/delete/search, copy with auto-clearing clipboard, password generator, auto-lock, auto-type login, encrypted backup/restore.
+- **Bring your passwords with you:** import from **KeePass 1 (`.kdb`)** databases directly, **KeePass 2.x XML**, OttoVault XML and **CSV**.
 
 ## Principles
-- **Your device, your data.** The vault is one encrypted file stored locally. Sync is optional and up to the user.
+- **Your device, your data.** The vault is one encrypted file stored locally. Sync is optional and up to you.
 - **One master password** unlocks it. It cannot be recovered if forgotten, and the app says so clearly.
-- **Well-known cryptography only.** A standard password-based key derivation (Scrypt or Argon2) plus AES-256-GCM, using vetted libraries. No homemade ciphers.
+- **Well-known cryptography only.** No homemade ciphers.
 - **Open and self-hostable.** Readable source, no telemetry, no network calls by default.
-- **Simple first.** Add, edit, delete and search entries, copy a password with auto-clearing clipboard, a password generator, auto-lock, encrypted backup, and import from CSV.
+- **Simple first, AI-ready by design.**
 
 ## Honest notes
 - A new, unaudited app should not be anyone's only copy of their passwords. Keep an existing manager until you trust it, and keep backups.
-- Established free options already exist (for example KeePass-family apps and Bitwarden's free tier). This project is a learning build and a simple option, not a claim to be safer than them.
+- Established free options already exist (for example KeePass-family apps and Bitwarden's free tier). OttoVault's reason to exist is the permissioned AI-assistant access above; it is a young project, not a claim to be safer than them.
 
 ## Status (version 1.3.2)
 A working Windows version is included here: Python and tkinter, local only, no network code.
