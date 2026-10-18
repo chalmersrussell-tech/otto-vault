@@ -8,11 +8,12 @@ where py >nul 2>nul && set "PY=py"
 if not defined PY (where python >nul 2>nul && set "PY=python")
 if not defined PY goto nopython
 
-rem --- first run: install the one needed package (quietly)
-%PY% -c "import cryptography" >nul 2>nul
+rem --- first run (or after an update): make sure the one needed package is
+rem     installed and new enough for Argon2id (cryptography 44 or newer)
+%PY% -c "from cryptography.hazmat.primitives.kdf.argon2 import Argon2id" >nul 2>nul
 if not errorlevel 1 goto launch
-echo Setting up OttoVault for the first time (one-time, takes a few seconds)...
-%PY% -m pip install -r requirements.txt --quiet --disable-pip-version-check >nul 2>nul
+echo Setting up OttoVault (one-time, takes a few seconds)...
+%PY% -m pip install --upgrade -r requirements.txt --quiet --disable-pip-version-check >nul 2>nul
 %PY% -c "import cryptography" >nul 2>nul
 if errorlevel 1 goto pipfail
 

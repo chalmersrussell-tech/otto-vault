@@ -15,7 +15,15 @@ NEVER = "never"
 
 
 def default_settings():
-    return {"version": 1, "idle_minutes": DEFAULT_MINUTES}
+    return {"version": 1, "idle_minutes": DEFAULT_MINUTES,
+            "ai_expiry_days": V.DEFAULT_AI_EXPIRY_DAYS}
+
+
+def normalize_expiry(value):
+    """Days an AI-access approval lasts (0 = never, 7, 30). Default 30."""
+    if isinstance(value, int) and not isinstance(value, bool) and value in V.AI_EXPIRY_CHOICES:
+        return value
+    return V.DEFAULT_AI_EXPIRY_DAYS
 
 
 def settings_path_for(vault_path):
@@ -41,13 +49,15 @@ def load_settings(path):
             doc = json.loads(f.read(65536).decode("utf-8"))
         if isinstance(doc, dict):
             s["idle_minutes"] = normalize_minutes(doc.get("idle_minutes"))
+            s["ai_expiry_days"] = normalize_expiry(doc.get("ai_expiry_days"))
     except Exception:
         pass
     return s
 
 
 def save_settings(path, settings):
-    clean = {"version": 1, "idle_minutes": normalize_minutes(settings.get("idle_minutes"))}
+    clean = {"version": 1, "idle_minutes": normalize_minutes(settings.get("idle_minutes")),
+             "ai_expiry_days": normalize_expiry(settings.get("ai_expiry_days"))}
     V._atomic_write(path, (json.dumps(clean, indent=1) + "\n").encode("utf-8"),
                     keep_backup=False)
     return clean

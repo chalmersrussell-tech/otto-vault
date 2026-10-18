@@ -14,6 +14,8 @@ import base64
 import copy
 import csv
 import collections
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -22,6 +24,7 @@ import shutil
 import string
 import tempfile
 import time
+import unicodedata
 import uuid
 
 from cryptography.exceptions import InvalidTag
@@ -34,7 +37,12 @@ from cryptography.hazmat.primitives.serialization import (
     Encoding, NoEncryption, PrivateFormat, PublicFormat)
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
-__version__ = "1.2.1"
+try:   # Argon2id needs the "cryptography" package 44.0 or newer
+    from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
+except ImportError:   # pragma: no cover - depends on the installed version
+    Argon2id = None
+
+__version__ = "1.3.0"
 
 FORMAT_NAME = "OttoVault"
 FORMAT_VERSION = 1
@@ -48,8 +56,19 @@ MIN_PASSWORD_LEN = 8
 MAX_KDF_N = 2 ** 20      # refuse absurd values from a hostile file
 MAX_FILE_BYTES = 64 * 1024 * 1024
 
+# Argon2id (RFC 9106 "second recommended option": 64 MiB, 3 passes, 4 lanes).
+# Stored in the file header (authenticated), so parameters can be raised later
+# and old vaults keep opening with whatever they were created with.
+ARGON2_VERSION = 0x13
+ARGON2_PARAMS = {"m": 65536, "t": 3, "p": 4}      # m in KiB; new vaults / upgrades
+ARGON2_MIN = {"m": 19456, "t": 2, "p": 1}         # OWASP floor: refuse weaker files
+ARGON2_MAX = {"m": 1048576, "t": 10, "p": 16}     # refuse absurd values (1 GiB)
+
 FIELDS = ("title", "username", "password", "url", "notes")
 FLAG_FIELDS = ("otto_approved",)     # booleans stored with each entry
+DAY = 86400
+AI_EXPIRY_CHOICES = (0, 7, 30)       # days; 0 = never expires
+DEFAULT_AI_EXPIRY_DAYS = 30
 
 
 class VaultError(Exception):
@@ -103,6 +122,45 @@ def _derive_key(password, salt, n, r, p):
     return kdf.derive(password.encode("utf-8"))
 
 
+def argon2_available():
+    return Argon2id is not None
+
+
+def _derive_with(kdf, password):
+    """Derive the vault key for a (validated) kdf header dict."""
+    salt = _b64d(kdf["salt"])
+    if kdf["name"] == "argon2id":
+        if Argon2id is None:
+            raise VaultError(
+                "This vault uses Argon2id, which needs a newer 'cryptography' package. "
+                "Run:  py -m pip install --upgrade cryptography")
+        return Argon2id(salt=salt, length=KEY_LEN, iterations=kdf["t"], lanes=kdf["p"],
+                        memory_cost=kdf["m"]).derive(password.encode("utf-8"))
+    return _derive_key(password, salt, kdf["n"], kdf["r"], kdf["p"])
+
+
+def _new_kdf(name=None, kdf_n=KDF_N):
+    """Fresh header (random salt). name None = best available."""
+    if name is None:
+        name = "argon2id" if Argon2id is not None else "scrypt"
+    salt = _b64e(secrets.token_bytes(SALT_LEN))
+    if name == "argon2id":
+        if Argon2id is None:
+            raise VaultError("Argon2id is not available (needs cryptography 44 or newer).")
+        return {"name": "argon2id", "m": ARGON2_PARAMS["m"], "t": ARGON2_PARAMS["t"],
+                "p": ARGON2_PARAMS["p"], "v": ARGON2_VERSION, "salt": salt}
+    return {"name": "scrypt", "n": kdf_n, "r": KDF_R, "p": KDF_P, "salt": salt}
+
+
+def _kdf_outdated(kdf):
+    """True if this header is weaker than what new vaults get (and we can upgrade)."""
+    if Argon2id is None:
+        return False
+    if kdf["name"] != "argon2id":
+        return True
+    return any(kdf[k] < ARGON2_PARAMS[k] for k in ("m", "t", "p"))
+
+
 def _aad(kdf):
     """Header bytes that are authenticated (not secret)."""
     hdr = {"format": FORMAT_NAME, "version": FORMAT_VERSION,
@@ -142,11 +200,23 @@ def _parse_file(raw):
             raise CorruptVaultError(
                 "This vault file has an unsupported version (%r)." % doc.get("version"))
         kdf = doc["kdf"]
-        if doc.get("cipher") != "AES-256-GCM" or kdf.get("name") != "scrypt":
+        if doc.get("cipher") != "AES-256-GCM" or kdf.get("name") not in ("scrypt", "argon2id"):
             raise ValueError
-        n, r, p = int(kdf["n"]), int(kdf["r"]), int(kdf["p"])
-        if not (KDF_N <= n <= MAX_KDF_N) or n & (n - 1) or not (1 <= r <= 16) or not (1 <= p <= 4):
-            raise CorruptVaultError("Vault file has unsafe or invalid KDF settings.")
+        if kdf["name"] == "argon2id":
+            m, t, p = kdf["m"], kdf["t"], kdf["p"]
+            if (any(type(x) is not int for x in (m, t, p)) or kdf.get("v") != ARGON2_VERSION
+                    or not (ARGON2_MIN["m"] <= m <= ARGON2_MAX["m"])
+                    or not (ARGON2_MIN["t"] <= t <= ARGON2_MAX["t"])
+                    or not (ARGON2_MIN["p"] <= p <= ARGON2_MAX["p"])):
+                raise CorruptVaultError("Vault file has unsafe or invalid KDF settings.")
+            kdf_clean = {"name": "argon2id", "m": m, "t": t, "p": p, "v": ARGON2_VERSION,
+                         "salt": kdf["salt"]}
+        else:
+            n, r, p = int(kdf["n"]), int(kdf["r"]), int(kdf["p"])
+            if (not (KDF_N <= n <= MAX_KDF_N) or n & (n - 1) or not (1 <= r <= 16)
+                    or not (1 <= p <= 4)):
+                raise CorruptVaultError("Vault file has unsafe or invalid KDF settings.")
+            kdf_clean = {"name": "scrypt", "n": n, "r": r, "p": p, "salt": kdf["salt"]}
         salt = _b64d(kdf["salt"])
         nonce = _b64d(doc["nonce"])
         ct = _b64d(doc["ciphertext"])
@@ -156,7 +226,6 @@ def _parse_file(raw):
         raise
     except Exception as exc:
         raise CorruptVaultError("This is not a valid OttoVault file.") from exc
-    kdf_clean = {"name": "scrypt", "n": n, "r": r, "p": p, "salt": kdf["salt"]}
     return kdf_clean, salt, nonce, ct
 
 
@@ -170,7 +239,7 @@ def _decrypt_file(path, password):
     except OSError as exc:
         raise VaultError("Could not read file: %s" % exc.strerror) from exc
     kdf, salt, nonce, ct = _parse_file(raw)
-    key = _derive_key(password, salt, kdf["n"], kdf["r"], kdf["p"])
+    key = _derive_with(kdf, password)
     try:
         plain = AESGCM(key).decrypt(nonce, ct, _aad(kdf))
     except InvalidTag as exc:
@@ -192,6 +261,93 @@ def _encrypt(data, key, kdf):
     doc = {"format": FORMAT_NAME, "version": FORMAT_VERSION, "kdf": kdf,
            "cipher": "AES-256-GCM", "nonce": _b64e(nonce), "ciphertext": _b64e(ct)}
     return json.dumps(doc, indent=1).encode("utf-8")
+
+
+# ------------------------------------------------------------ validation
+# Length / character-set hardening for everything that is stored (GUI save,
+# inbox files, CSV import, otto_add.py). The vault never builds SQL or shell
+# commands from these values, so this is not "injection prevention": it keeps
+# garbage, huge values and look-alike/invisible characters out of the vault and
+# makes service-name matching predictable. Passwords stay free-form.
+MAX_LEN = {"title": 200, "username": 256, "password": 1024, "url": 2048, "notes": 20000}
+
+
+def _collapse_ws(s):
+    """Any run of Unicode whitespace (tabs, newlines, NBSP, ...) -> one space."""
+    return " ".join(s.split())
+
+
+def _check_chars(name, s, forbidden):
+    for ch in s:
+        if unicodedata.category(ch) in forbidden:
+            raise VaultError("%s contains a character that is not allowed (U+%04X)."
+                             % (name.capitalize(), ord(ch)))
+
+
+def _checked_len(name, s):
+    if len(s) > MAX_LEN[name]:
+        raise VaultError("%s is too long (maximum %d characters)." % (name.capitalize(), MAX_LEN[name]))
+
+
+def clean_title(s, name="title"):
+    """Titles/usernames: NFC, whitespace collapsed, no control, invisible or
+    bidi-override characters."""
+    if not isinstance(s, str):
+        raise VaultError("%s must be text." % name.capitalize())
+    s = unicodedata.normalize("NFC", _collapse_ws(s))
+    _check_chars(name, s, ("Cc", "Cf", "Cs"))
+    _checked_len(name, s)
+    return s
+
+
+def clean_url(s):
+    if not isinstance(s, str):
+        raise VaultError("URL must be text.")
+    s = s.strip()
+    _check_chars("url", s, ("Cc", "Cf", "Cs"))
+    _checked_len("url", s)
+    return s
+
+
+def clean_password(s):
+    """Free-form (symbols, spaces, emoji are fine) - only length and control
+    characters (NUL, newline, tab, ...) are refused."""
+    if not isinstance(s, str):
+        raise VaultError("Password must be text.")
+    _check_chars("password", s, ("Cc", "Cs"))
+    _checked_len("password", s)
+    return s
+
+
+def clean_notes(s):
+    if not isinstance(s, str):
+        raise VaultError("Notes must be text.")
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
+    for ch in s:
+        if (unicodedata.category(ch) in ("Cc", "Cs") and ch not in "\n\t"):
+            raise VaultError("Notes contain a character that is not allowed (U+%04X)." % ord(ch))
+    _checked_len("notes", s)
+    return s
+
+
+def clean_entry_fields(title="", username="", password="", url="", notes=""):
+    """Validate + normalise one entry's text fields. Raises VaultError."""
+    t = clean_title(title or "", "title")
+    if not t:
+        raise VaultError("Title is required.")
+    return {"title": t, "username": clean_title(username or "", "username"),
+            "password": clean_password(password or ""), "url": clean_url(url or ""),
+            "notes": clean_notes(notes or "")}
+
+
+_CLEANERS = {"title": lambda v: clean_title(v, "title"),
+             "username": lambda v: clean_title(v, "username"),
+             "password": clean_password, "url": clean_url, "notes": clean_notes}
+
+
+def match_key(s):
+    """What service-name matching compares: NFKC, case-folded, spaces collapsed."""
+    return unicodedata.normalize("NFKC", _collapse_ws(str(s))).casefold()
 
 
 # ------------------------------------------------------------------ inbox
@@ -347,8 +503,8 @@ def _raw_pub(priv):
 def make_request(service, username="", now=None):
     """Build a request. Returns {"id", "blob", "eph_private"}; keep eph_private
     in memory only - it is the only key that can open the answer."""
-    service = (service or "").strip()
-    username = (username or "").strip()
+    service = clean_title(service or "", "title")
+    username = clean_title(username or "", "username")
     if not service or len(service) > MAX_NAME_LEN or len(username) > MAX_NAME_LEN:
         raise VaultError("Service/username must be 1-%d characters." % MAX_NAME_LEN)
     eph = X25519PrivateKey.generate()
@@ -375,7 +531,7 @@ def parse_request(blob, now=None):
             raise ValueError
         if not isinstance(svc, str) or not isinstance(usr, str):
             raise ValueError
-        svc, usr = svc.strip(), usr.strip()
+        svc, usr = clean_title(svc, "title"), clean_title(usr, "username")
         if not svc or len(svc) > MAX_NAME_LEN or len(usr) > MAX_NAME_LEN:
             raise ValueError
         ts = doc["ts"]
@@ -527,26 +683,177 @@ def parse_csv(path):
 
 
 # ------------------------------------------------------------------ Vault
+ANCHOR_FILENAME = "audit_anchor.json"
+_AUDIT_INFO = b"OttoVault audit chain v1"
+
+
+def anchor_path_for(vault_path):
+    d, name = os.path.split(os.path.abspath(vault_path))
+    return os.path.join(d, ANCHOR_FILENAME if name == "vault.dat"
+                        else name + "." + ANCHOR_FILENAME)
+
+
 class Vault:
     """An unlocked vault held in memory. Create with Vault.create / Vault.open."""
 
-    def __init__(self, path, data, key, kdf):
+    def __init__(self, path, data, key, kdf, expiry_days=DEFAULT_AI_EXPIRY_DAYS):
         self.path = path
         self._data = data
         self._key = key
         self._kdf = kdf
-        self._release_times = collections.deque()   # Otto rate limiting (memory only)
+        self.expiry_days = expiry_days if expiry_days in AI_EXPIRY_CHOICES else DEFAULT_AI_EXPIRY_DAYS
+        self._release_times = collections.deque()   # AI-access rate limiting (memory only)
         self._request_times = collections.deque()
         self._req_seen = collections.OrderedDict()
+        self._audit_key_cache = None
+        self._anchor_state = None
+        self._dirty = False                # migration/integrity changes not yet saved
+        self.integrity_warnings = []       # shown loudly by the GUI after unlock
+        self.kdf_upgraded = False          # True once if open() re-wrapped the key
         self._migrate()
+        self._verify_log()
 
+    # --- migration of older vaults (all in memory; saved by open())
     def _migrate(self):
-        """Older vaults/entries have no Otto fields: approval defaults to False.
-        Only the literal value True counts as approved."""
-        for e in self._data.get("entries", []):
+        """Older vaults/entries lack the AI-access fields. Approval defaults to
+        False; only the literal value True counts. Approvals that exist without a
+        start/expiry (1.2.x) get a fresh expiry from today, and a log line."""
+        now = int(time.time())
+        d = self._data
+        for e in d.get("entries", []):
             e["otto_approved"] = e.get("otto_approved") is True
-        if not isinstance(self._data.get("otto_log"), list):
-            self._data["otto_log"] = []
+            if not e["otto_approved"]:
+                e["otto_approved_at"] = None
+                e["otto_expires"] = None
+                continue
+            if not isinstance(e.get("otto_approved_at"), int):
+                e["otto_approved_at"] = now
+                e["otto_expires"] = now + self.expiry_days * DAY if self.expiry_days else None
+                self._dirty = True
+                d.setdefault("_pending_logs", []).append((e.get("title", ""), "approval period set"))
+            elif not (e.get("otto_expires") is None or isinstance(e.get("otto_expires"), int)):
+                e["otto_expires"] = None
+        if not isinstance(d.get("otto_log"), list):
+            d["otto_log"] = []
+        if not isinstance(d.get("otto_log_total"), int):
+            d["otto_log_total"] = len(d["otto_log"])
+        if not isinstance(d.get("otto_log_base"), str):
+            d["otto_log_base"] = ""
+
+    # --- audit log chain (tamper evidence; see README "Access log integrity")
+    def _audit_key(self):
+        if self._audit_key_cache is None:
+            self._audit_key_cache = HKDF(algorithm=hashes.SHA256(), length=32, salt=None,
+                                         info=_AUDIT_INFO).derive(self._key)
+        return self._audit_key_cache
+
+    def _mac(self, prev, rec):
+        msg = json.dumps([prev, rec.get("t"), rec.get("title"), rec.get("result")],
+                         ensure_ascii=True, separators=(",", ":")).encode("ascii")
+        return hmac.new(self._audit_key(), msg, hashlib.sha256).hexdigest()
+
+    def _log_head(self):
+        log = self._data.get("otto_log") or []
+        return log[-1].get("mac", "") if log else self._data.get("otto_log_base", "")
+
+    def _reseal_log(self):
+        """Recompute every MAC from the stored base (after a migration, a
+        master-password change, or once a break has been reported)."""
+        prev = self._data["otto_log_base"]
+        for rec in self._data["otto_log"]:
+            rec["mac"] = self._mac(prev, rec)
+            prev = rec["mac"]
+
+    def _verify_log(self):
+        """Check the chain and the outside anchor. Fills self.integrity_warnings,
+        records ONE 'log integrity warning' event per problem set, re-seals."""
+        d = self._data
+        log = d["otto_log"]
+        problems = []
+        legacy = [r for r in log if not isinstance(r, dict) or "mac" not in r]
+        if legacy and len(legacy) == len(log):      # 1.2.x log: start the chain now
+            for r in log:
+                r.setdefault("t", 0); r.setdefault("title", ""); r.setdefault("result", "")
+            self._reseal_log()
+            self._dirty = True
+            d.setdefault("_pending_logs", []).append(
+                ("(%d earlier entries)" % len(log), "log chain enabled"))
+        else:
+            prev = d["otto_log_base"]
+            for n, rec in enumerate(log):
+                ok = (isinstance(rec, dict) and isinstance(rec.get("mac"), str)
+                      and isinstance(rec.get("t"), int) and isinstance(rec.get("title"), str)
+                      and isinstance(rec.get("result"), str)
+                      and hmac.compare_digest(rec["mac"], self._mac(prev, rec)))
+                if not ok:
+                    problems.append("entry %d of %d in the AI access log was altered, "
+                                    "removed or reordered" % (n + 1, len(log)))
+                    break
+                prev = rec["mac"]
+            if len(log) > 0 and d["otto_log_total"] < len(log):
+                problems.append("the AI access log counter is inconsistent")
+        problems += self._check_anchor()
+        if problems:
+            self.integrity_warnings = problems
+            if any(not isinstance(r, dict) for r in log):
+                d["otto_log"] = [r for r in log if isinstance(r, dict)]
+            for r in d["otto_log"]:
+                r.setdefault("t", 0); r.setdefault("title", ""); r.setdefault("result", "")
+                for k, dflt in (("t", 0), ("title", ""), ("result", "")):
+                    if not isinstance(r[k], type(dflt)):
+                        r[k] = dflt
+            self._reseal_log()
+            d.setdefault("_pending_logs", []).append((_clean_text(problems[0], 90),
+                                                      "log integrity warning"))
+            self._dirty = True
+        self._flush_pending_logs()
+
+    def _flush_pending_logs(self):
+        pend = self._data.pop("_pending_logs", [])
+        for title, result in pend:
+            self._log_otto(title, result)
+
+    def _anchor_tag(self, total, head):
+        return hmac.new(self._audit_key(), ("anchor|%d|%s" % (total, head)).encode("ascii"),
+                        hashlib.sha256).hexdigest()
+
+    def _check_anchor(self):
+        """Compare with the small outside file written at every save. It is
+        MAC'd with the vault-derived key, so it cannot be forged without the
+        master password; it exposes a rolled-back or truncated vault copy."""
+        try:
+            with open(anchor_path_for(self.path), "rb") as f:
+                a = json.loads(f.read(4096).decode("utf-8"))
+            total, head, tag = a["total"], a["head"], a["tag"]
+            if type(total) is not int or not isinstance(head, str) or not isinstance(tag, str):
+                raise ValueError
+        except FileNotFoundError:
+            return []
+        except Exception:
+            return ["the audit anchor file next to the vault is unreadable"]
+        if not hmac.compare_digest(tag, self._anchor_tag(total, head)):
+            return ["the audit anchor does not belong to this vault (the vault was replaced, "
+                    "restored from another backup, or the anchor file was edited)"]
+        mine = self._data["otto_log_total"]
+        if total > mine:
+            return ["the AI access log is older than the last one seen "
+                    "(vault restored from an older copy, or log entries were removed)"]
+        if total == mine and head != self._log_head():
+            return ["the AI access log differs from the last one seen"]
+        return []
+
+    def _write_anchor(self):
+        total, head = self._data.get("otto_log_total", 0), self._log_head()
+        if self._anchor_state == (total, head):
+            return
+        doc = {"format": "OttoVault-audit-anchor", "version": 1, "total": total,
+               "head": head, "tag": self._anchor_tag(total, head)}
+        try:
+            _atomic_write(anchor_path_for(self.path), json.dumps(doc).encode("utf-8"),
+                          keep_backup=False)
+            self._anchor_state = (total, head)
+        except OSError:
+            pass
 
     # --- creation / opening
     @staticmethod
@@ -554,30 +861,72 @@ class Vault:
         return os.path.isfile(path)
 
     @classmethod
-    def create(cls, path, password, kdf_n=KDF_N):
+    def create(cls, path, password, kdf_n=KDF_N, kdf=None,
+               expiry_days=DEFAULT_AI_EXPIRY_DAYS):
+        """kdf: None = Argon2id when available else Scrypt; or "argon2id"/"scrypt"."""
         check_master_password(password)
         if os.path.exists(path):
             raise VaultError("A vault already exists at this location.")
-        salt = secrets.token_bytes(SALT_LEN)
-        kdf = {"name": "scrypt", "n": kdf_n, "r": KDF_R, "p": KDF_P, "salt": _b64e(salt)}
-        key = _derive_key(password, salt, kdf_n, KDF_R, KDF_P)
-        v = cls(path, {"version": 1, "entries": []}, key, kdf)
+        header = _new_kdf(kdf, kdf_n)
+        key = _derive_with(header, password)
+        v = cls(path, {"version": 1, "entries": []}, key, header, expiry_days)
         v.save()
         return v
 
     @classmethod
-    def open(cls, path, password):
+    def open(cls, path, password, expiry_days=DEFAULT_AI_EXPIRY_DAYS, upgrade_kdf=True):
         data, key, kdf = _decrypt_file(path, password)
-        return cls(path, data, key, kdf)
+        v = cls(path, data, key, kdf, expiry_days)
+        if upgrade_kdf and _kdf_outdated(kdf):
+            v._upgrade_kdf(password)
+        if v._dirty:
+            v._dirty = False
+            v.save()
+        else:
+            v._write_anchor()
+        return v
+
+    def _upgrade_kdf(self, password):
+        """Transparent one-time re-wrap with the current best KDF, done right
+        after a successful unlock (the only moment the password is at hand).
+        The previous file is kept as <vault>.pre-upgrade.bak. On any failure the
+        old key/header stay in use and nothing is lost."""
+        try:
+            new_kdf = _new_kdf(None)
+            new_key = _derive_with(new_kdf, password)
+            keep = self.path + ".pre-upgrade.bak"
+            if not os.path.exists(keep):
+                shutil.copy2(self.path, keep)
+            old = (self._key, self._kdf, self._audit_key_cache)
+            self._key, self._kdf, self._audit_key_cache = new_key, new_kdf, None
+            try:
+                self._reseal_log()
+                self.save()
+            except Exception:
+                self._key, self._kdf, self._audit_key_cache = old
+                raise
+            self._anchor_state = None
+            self._write_anchor()
+            self.kdf_upgraded = True
+            self._dirty = False
+        except Exception:
+            self.kdf_upgraded = False
+
+    @property
+    def kdf_name(self):
+        return self._kdf["name"]
 
     # --- persistence
     def save(self):
+        self._flush_pending_logs()
         _atomic_write(self.path, _encrypt(self._data, self._key, self._kdf))
+        self._write_anchor()
 
     def lock(self):
         """Forget the key and data (best effort - Python can't truly wipe)."""
         self._key = b""
-        self._data = {"entries": [], "otto_log": []}
+        self._audit_key_cache = None
+        self._data = {"entries": [], "otto_log": [], "otto_log_total": 0, "otto_log_base": ""}
         self._release_times.clear()
         self._request_times.clear()
         self._req_seen.clear()
@@ -598,22 +947,34 @@ class Vault:
         raise KeyError(entry_id)
 
     def _new_entry(self, title, username, password, url, notes):
-        title = (title or "").strip()
-        if not title:
-            raise VaultError("Title is required.")
+        c = clean_entry_fields(title, username, password, url, notes)
         now = int(time.time())
-        return {"id": uuid.uuid4().hex, "title": title, "username": username or "",
-                "password": password or "", "url": (url or "").strip(),
-                "notes": notes or "", "otto_approved": False,
+        return {"id": uuid.uuid4().hex, "title": c["title"], "username": c["username"],
+                "password": c["password"], "url": c["url"],
+                "notes": c["notes"], "otto_approved": False,
+                "otto_approved_at": None, "otto_expires": None,
                 "created": now, "modified": now}
+
+    def _grant(self, e, now=None):
+        now = int(time.time() if now is None else now)
+        e["otto_approved"] = True
+        e["otto_approved_at"] = now
+        e["otto_expires"] = now + self.expiry_days * DAY if self.expiry_days else None
+        return ("approved (expires %s)" % time.strftime("%Y-%m-%d", time.localtime(e["otto_expires"]))
+                if e["otto_expires"] else "approved (no expiry)")
+
+    @staticmethod
+    def _unapprove(e):
+        e["otto_approved"] = False
+        e["otto_approved_at"] = None
+        e["otto_expires"] = None
 
     def add_entry(self, title, username="", password="", url="", notes="",
                   otto_approved=False, save=True):
         e = self._new_entry(title, username, password, url, notes)
-        e["otto_approved"] = otto_approved is True
         self._data["entries"].append(e)
-        if e["otto_approved"]:
-            self._log_otto(e["title"], "approved")
+        if otto_approved is True:
+            self._log_otto(e["title"], self._grant(e))
         if save:
             self.save()
         return e["id"]
@@ -622,30 +983,39 @@ class Vault:
         for e in self._data["entries"]:
             if e["id"] == entry_id:
                 new = dict(e)
+                want_flag = None
                 for k, val in fields.items():
                     if k in FLAG_FIELDS:
-                        new[k] = val is True
+                        want_flag = val is True
                     elif k in FIELDS:
-                        new[k] = val if val is not None else ""
+                        val = val if val is not None else ""
+                        if not isinstance(val, str):
+                            raise VaultError("%s must be text." % k.capitalize())
+                        # only re-validate what changed (old entries may predate the limits)
+                        new[k] = val if val == e.get(k) else _CLEANERS[k](val)
                     else:
                         raise VaultError("Unknown field: %s" % k)
-                new["title"] = new["title"].strip()
                 if not new["title"]:
                     raise VaultError("Title is required.")
                 new["modified"] = int(time.time())
                 was = e.get("otto_approved") is True
                 e.update(new)
-                if new["otto_approved"] != was:
-                    self._log_otto(new["title"], "approved" if new["otto_approved"] else "revoked")
+                if want_flag is True and not was:
+                    self._log_otto(e["title"], self._grant(e))
+                elif want_flag is False and was:
+                    self._unapprove(e)
+                    self._log_otto(e["title"], "revoked")
                 self.save()
                 return
         raise KeyError(entry_id)
 
     def delete_entry(self, entry_id):
-        n = len(self._data["entries"])
-        self._data["entries"] = [e for e in self._data["entries"] if e["id"] != entry_id]
-        if len(self._data["entries"]) == n:
+        gone = [e for e in self._data["entries"] if e["id"] == entry_id]
+        if not gone:
             raise KeyError(entry_id)
+        self._data["entries"] = [e for e in self._data["entries"] if e["id"] != entry_id]
+        if gone[0].get("otto_approved") is True:
+            self._log_otto(gone[0]["title"], "revoked (entry deleted)")
         self.save()
 
     def search(self, text):
@@ -659,16 +1029,15 @@ class Vault:
     # --- master password
     def change_master_password(self, old_password, new_password):
         check_master_password(new_password)
-        # verify the old one by re-deriving from the current salt
-        salt = _b64d(self._kdf["salt"])
-        old_key = _derive_key(old_password, salt, self._kdf["n"], self._kdf["r"], self._kdf["p"])
+        # verify the old one by re-deriving from the current header
+        old_key = _derive_with(self._kdf, old_password)
         if not secrets.compare_digest(old_key, self._key):
             raise WrongPasswordError("Current master password is wrong.")
-        new_salt = secrets.token_bytes(SALT_LEN)
-        kdf = {"name": "scrypt", "n": max(KDF_N, self._kdf["n"]), "r": KDF_R, "p": KDF_P,
-               "salt": _b64e(new_salt)}
-        self._key = _derive_key(new_password, new_salt, kdf["n"], kdf["r"], kdf["p"])
-        self._kdf = kdf
+        kdf = _new_kdf(None, max(KDF_N, self._kdf.get("n", KDF_N)))
+        new_key = _derive_with(kdf, new_password)
+        self._key, self._kdf, self._audit_key_cache = new_key, kdf, None
+        self._reseal_log()                  # the audit MAC key follows the vault key
+        self._anchor_state = None
         self.save()
 
     # --- inbox (see section above)
@@ -737,8 +1106,16 @@ class Vault:
             if mid and mid in seen:        # already imported earlier
                 done.append(fp)
                 continue
-            self._data["entries"].append(self._new_entry(
-                *(str(payload.get(f, "") or "") for f in FIELDS)))
+            try:
+                new = self._new_entry(*(str(payload.get(f, "") or "") for f in FIELDS))
+            except VaultError:             # too long / forbidden characters
+                bad += 1
+                try:
+                    os.replace(fp, fp + ".bad")
+                except OSError:
+                    pass
+                continue
+            self._data["entries"].append(new)
             if mid:
                 seen.append(mid)
             added += 1
@@ -758,25 +1135,49 @@ class Vault:
         return sum(1 for e in self._data["entries"] if e.get("otto_approved") is True)
 
     def revoke_all_otto(self):
-        """Remove every standing approval. Returns how many were revoked."""
+        """Remove every AI-access approval. Each one is logged. Returns the count."""
         n = 0
         for e in self._data["entries"]:
             if e.get("otto_approved") is True:
-                e["otto_approved"] = False
+                self._unapprove(e)
+                self._log_otto(e["title"], "revoked")
                 n += 1
         self._log_otto("(all entries)", "revoked all (%d)" % n)
         self.save()
         return n
 
+    def expire_approvals(self, now=None):
+        """Turn off approvals whose expiry has passed (re-tick needed). Logged.
+        Returns the titles. Runs at unlock and on every request poll."""
+        if self.locked:
+            return []
+        now = time.time() if now is None else now
+        out = []
+        for e in self._data["entries"]:
+            exp = e.get("otto_expires")
+            if e.get("otto_approved") is True and exp is not None and exp <= now:
+                self._unapprove(e)
+                self._log_otto(e["title"], "expired", now)
+                out.append(e["title"])
+        if out:
+            self.save()
+        return out
+
     def otto_log(self):
         """Newest first: [{'t': epoch, 'title': str, 'result': str}] - never a password."""
-        return list(reversed(copy.deepcopy(self._data["otto_log"])))
+        return [{"t": r["t"], "title": r["title"], "result": r["result"]}
+                for r in reversed(self._data["otto_log"])]
 
     def _log_otto(self, title, result, now=None):
-        log = self._data["otto_log"]
-        log.append({"t": int(time.time() if now is None else now),
-                    "title": _clean_text(title), "result": result})
-        del log[:-OTTO_LOG_MAX]
+        d = self._data
+        log = d["otto_log"]
+        rec = {"t": int(time.time() if now is None else now),
+               "title": _clean_text(title), "result": result}
+        rec["mac"] = self._mac(self._log_head(), rec)
+        log.append(rec)
+        d["otto_log_total"] += 1
+        while len(log) > OTTO_LOG_MAX:
+            d["otto_log_base"] = log.pop(0)["mac"]
 
     def process_requests(self, requests_dir=None, responses_dir=None, now=None):
         """Answer waiting *.ottoreq files. Only works while unlocked (a locked
@@ -787,16 +1188,16 @@ class Vault:
         if self.locked:
             return []
         now = time.time() if now is None else now
+        results = [(_clean_text(t, 60), "expired") for t in self.expire_approvals(now)]
         rdir = requests_dir or request_dir_for(self.path)
         odir = responses_dir or response_dir_for(self.path)
         if not os.path.isdir(rdir):
-            return []
+            return results
         try:
             names = sorted(n for n in os.listdir(rdir) if n.endswith(REQUEST_EXT))
         except OSError:
-            return []
+            return results
         self._sweep_responses(odir, now)
-        results = []
         if not names:
             return results
         self.ensure_inbox_keypair()
@@ -856,17 +1257,18 @@ class Vault:
         return results
 
     def _decide(self, req, now):
-        svc = req["service"].casefold()
-        usr = req["username"].casefold()
+        svc = match_key(req["service"])
+        usr = match_key(req["username"])
         hits = [e for e in self._data["entries"]
-                if e["title"].strip().casefold() == svc
-                and (not usr or e["username"].strip().casefold() == usr)]
+                if match_key(e["title"]) == svc
+                and (not usr or match_key(e["username"]) == usr)]
         if not hits:
             return R_NOT_FOUND, None
         if len(hits) > 1:
             return R_AMBIGUOUS, None
         e = hits[0]
-        if e.get("otto_approved") is not True:
+        exp = e.get("otto_expires")
+        if e.get("otto_approved") is not True or (exp is not None and exp <= now):
             return R_DENIED, e
         while self._release_times and now - self._release_times[0] > 60:
             self._release_times.popleft()
@@ -901,12 +1303,17 @@ class Vault:
         have = {tuple(e[f] for f in FIELDS) for e in self._data["entries"]}
         added = skipped = 0
         for r in rows:
-            key = tuple(r[f] for f in FIELDS)
+            try:      # compare/store the NORMALISED form (e.g. Windows CRLF in notes -> LF)
+                c = clean_entry_fields(**{f: r[f] for f in FIELDS})
+            except VaultError:             # invalid rows are skipped, never half-imported
+                skipped += 1
+                continue
+            key = tuple(c[f] for f in FIELDS)
             if key in have:
                 skipped += 1
                 continue
             have.add(key)
-            self._data["entries"].append(self._new_entry(**{f: r[f] for f in FIELDS}))
+            self._data["entries"].append(self._new_entry(**c))
             added += 1
         if added:
             self.save()

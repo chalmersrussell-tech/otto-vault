@@ -14,3 +14,9 @@ __pycache__/
 venv/
 OTTO_USAGE.local.md
 *.local.md
+build/
+dist/
+*.spec
+*.pre-upgrade.bak
+lockout.json
+audit_anchor.json

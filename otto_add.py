@@ -59,14 +59,18 @@ def main(argv=None):
         print("ERROR: choose --generate-password or --password-stdin", file=sys.stderr)
         return 2
 
-    blob = V.inbox_seal(pub, {"title": a.service, "username": username,
-                              "password": password, "url": a.url, "notes": a.notes})
+    try:       # same length/character rules the vault applies on import
+        clean = V.clean_entry_fields(a.service, username, password, a.url, a.notes)
+    except V.VaultError as exc:
+        print("ERROR: %s" % exc, file=sys.stderr)
+        return 2
+    blob = V.inbox_seal(pub, clean)
     inbox = os.path.join(base, V.INBOX_DIRNAME)
     os.makedirs(inbox, exist_ok=True)
     name = "%s-%s%s" % (time.strftime("%Y%m%d-%H%M%S"), secrets.token_hex(4), V.INBOX_EXT)
     V._atomic_write(os.path.join(inbox, name), blob, keep_backup=False)
     print("Queued entry '%s' (username: %s). File: %s (%d bytes)"
-          % (a.service, username, name, len(blob)))
+          % (clean["title"], clean["username"], name, len(blob)))
     print("It will be added to the vault the next time OttoVault is unlocked.")
     return 0
 

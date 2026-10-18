@@ -55,6 +55,24 @@ a.idle._last -= 10 ** 7; pump(1.5); assert a.vault is not None, "never mode lock
 # sleep/pause detection locks
 a._last_tick -= 1000; pump(1.5); assert a.vault is None, "pause did not lock"
 
+# ---- failed-unlock lockout: 5 wrong passwords -> Unlock disabled, even the right one refused
+for i in range(5):
+    a.pw1.set("wrong-wrong-%d" % i); a.do_unlock()
+assert a.vault is None and a.lockout.remaining() > 0
+a.update()
+assert "disabled" in a.unlock_btn.state(), a.unlock_btn.state()
+assert "Too many wrong passwords" in a.lock_msg.get(), a.lock_msg.get()
+assert os.path.exists(os.path.join(os.path.dirname(path), "lockout.json"))
+assert b"throwaway-test-pw" not in open(os.path.join(os.path.dirname(path), "lockout.json"), "rb").read()
+a.pw1.set("throwaway-test-pw"); a.do_unlock()
+assert a.vault is None, "unlocked during lockout!"
+a.lockout.until = int(time.time()) - 1; pump(1.5)          # the delay has passed
+assert "disabled" not in a.unlock_btn.state()
+a.pw1.set("throwaway-test-pw"); a.do_unlock(); a.update()
+assert a.vault is not None and a.lockout.failures == 0
+assert not os.path.exists(os.path.join(os.path.dirname(path), "lockout.json"))
+a.lock(); a.update()
+
 # inbox: Otto drops an entry while the vault is locked; import happens on unlock
 pub = V.read_public_key_file(V.public_key_path_for(path))
 inbox = V.inbox_dir_for(path); os.makedirs(inbox, exist_ok=True)
@@ -129,6 +147,35 @@ a.lock(); a.update()
 assert otto_ask("Test") is None, "answered while locked!"
 a.pw1.set("throwaway-test-pw"); a.do_unlock(); a.update()
 print("otto approval GUI OK")
+
+# ---- AI access expiry (settings menu, form label, sweep) and log-integrity warning
+assert "AI access approval lasts (for new approvals):" in menu_labels(a.nametowidget(a.cget("menu")))
+a.expiry_choice.set("7"); a.on_expiry_choice()
+assert S.load_settings(S.settings_path_for(path))["ai_expiry_days"] == 7 and a.vault.expiry_days == 7
+a.tree.selection_set(tid); a.update()
+a.otto_var.set(False); a.save_entry(); a.update()
+a.otto_var.set(True); a.save_entry(); a.update()           # a fresh grant uses the new setting
+e = a.vault.get_entry(tid)
+assert e["otto_expires"] - e["otto_approved_at"] == 7 * 86400
+assert a.expiry_text.get().startswith("AI access ends "), a.expiry_text.get()
+a.expiry_choice.set("30"); a.on_expiry_choice()
+a.vault._data["entries"][[x["id"] for x in a.vault._data["entries"]].index(tid)]["otto_expires"] = int(time.time()) - 5
+a._last_request_check = 0; pump(A.REQUEST_CHECK_SECS + 1.5)
+assert a.vault.get_entry(tid)["otto_approved"] is False
+assert a.otto_var.get() is False, "form still ticked after expiry"
+assert "expired" in a.status.get(), a.status.get()
+assert a.tree.set(tid, "ai") == ""
+# tamper with the in-vault log (raw write) -> loud warning on next unlock
+a.lock(); a.update()
+w = V.Vault.open(path, "throwaway-test-pw")
+w._data["otto_log"][1]["result"] = "released"
+V._atomic_write(path, V._encrypt(w._data, w._key, w._kdf))
+shown.clear()
+a.pw1.set("throwaway-test-pw"); a.do_unlock(); a.update()
+assert any("tampered" in m for m in shown), shown
+assert "WARNING" in a.status.get()
+assert a.vault.otto_log()[0]["result"] == "log integrity warning"
+print("hardening GUI OK")
 
 # auto-type flow with mocked SendInput + short countdown
 A.AUTOTYPE_COUNTDOWN = 1

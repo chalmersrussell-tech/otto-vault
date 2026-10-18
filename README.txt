@@ -1,4 +1,4 @@
-OTTOVAULT 1.2.1 - a free password manager that lives only on your PC
+OTTOVAULT 1.3.0 - a free password manager that lives only on your PC
 ================================================================
 No cloud. No internet use. No account. No subscription. No tracking.
 Your passwords are stored in one encrypted file on this computer.
@@ -75,6 +75,24 @@ unlocked OttoVault can read it. Otto never sees your master password or your
 vault. Next time OttoVault is unlocked it adds the entry, deletes the file and
 says "Imported 1 entry from Otto". Files it cannot read are renamed *.bad.
 
+SAFETY FEATURES - NEW in 1.3
+----------------------------
+* WRONG-PASSWORD DELAY: after 5 wrong master passwords in a row the Unlock
+  button pauses for 30 seconds, then 60, 120 ... up to 15 minutes. The right
+  password resets it. (A speed bump for someone typing guesses; it cannot slow
+  an attack on a stolen copy of the file - the Argon2id cost does that.)
+* INPUT LIMITS: title 200, username 256, password 1024, URL 2048, notes 20000
+  characters; invisible/control characters are refused (passwords can still
+  contain any symbols). Also applied to the inbox and CSV import.
+* AI ACCESS EXPIRES: see the next section.
+* ACCESS LOG CHECK: the AI access log is chained with a secret code so that
+  edits, deleted lines or a restored old copy show a warning when you unlock.
+  It cannot stop you (or someone who knows your master password) from deleting
+  the vault file itself.
+* OttoVault.exe: build_exe.bat builds a real program (no black window) from
+  the source - see "OttoVault.exe" below. It is a convenience, not extra
+  security, and it is not code-signed (Windows may warn).
+
 ALLOW AI ACCESS TO SOME PASSWORDS - NEW in 1.2
 ---------------------------------------------
 This is OPTIONAL and OFF for every entry until you turn it on.
@@ -89,6 +107,9 @@ This is OPTIONAL and OFF for every entry until you turn it on.
 * File > AI access log... lists every request (time, service, released /
   denied / not found). Passwords are never written in the log. The log and
   the approvals live inside your encrypted vault.
+* Each approval lasts 30 days by default (Settings > "AI access approval
+  lasts": 30 days / 7 days / never). Afterwards the box switches itself off
+  and you tick it again if you still want it. The entry shows the end date.
 * Untick the box and Save to take back one approval immediately.
   Settings > Revoke all AI access approvals... removes all of them.
 * The status line tells you when an AI assistant asked ("An AI assistant asked
@@ -98,6 +119,21 @@ Honest tradeoff: while the vault is unlocked, ANY program running as your
 Windows user could also file a request for an approved entry. So approve only
 the services you want automated, and lock the vault (File > Lock now) when
 you are away. See OTTO_USAGE.md.
+
+OttoVault.exe (optional)
+------------------------
+Double-click build_exe.bat once (needs internet for one small download):
+it installs PyInstaller for your user only and builds OttoVault.exe into
+%LOCALAPPDATA%\Programs\OttoVault\ . Point your shortcut at that file.
+Run OttoVault.bat keeps working as the plain way to start the program. Neither
+one makes the vault any safer or less safe: the protection is your master
+password and the encryption. The exe is not code-signed, so Windows
+SmartScreen or antivirus may warn, and some Windows setups (Smart App Control,
+AppLocker, company policy) refuse to run unsigned programs altogether. If
+Windows says "An Application Control policy has blocked this file", just keep
+using Run OttoVault.bat - do not turn Windows protections off for this.
+Build it yourself from this folder.
+Your vault is never copied into the build. Rebuild after every update.
 
 EVERYDAY USE
 ------------
@@ -145,7 +181,11 @@ delete the AppData\OttoVault folder.
 
 HOW IT PROTECTS YOU (for the curious)
 -------------------------------------
-* Master password -> key using Scrypt (n=32768, r=8, p=1, random 16-byte salt).
+* Master password -> key using Argon2id (64 MiB, 3 passes, 4 lanes, random
+  16-byte salt). Older vaults used Scrypt (n=32768, r=8, p=1); they still open
+  and are upgraded to Argon2id once, right after you unlock. A copy of the old
+  file is kept as vault.dat.pre-upgrade.bak. Needs 'cryptography' 44 or newer
+  (Run OttoVault.bat installs/updates it for you).
 * The whole vault is encrypted with AES-256-GCM (random 12-byte nonce on each
   save); any change to the file is detected and refused.
 * Saves are atomic (temp file then replace). No plain text is ever written
@@ -181,6 +221,6 @@ HOW TO TEST IT (5 minutes, uses a fake entry)
 FOR DEVELOPERS: tests
 ---------------------
   py -m pip install pytest
-  py -m pytest tests          (95 tests)
+  py -m pytest tests          (151 tests)
   otto_get.py asks the unlocked app for an approved password (status only unless --print)
   otto_add.py queues an inbox entry:  py otto_add.py --service "Name" --generate-username --generate-password

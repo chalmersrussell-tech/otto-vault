@@ -18,7 +18,7 @@ def vpath(tmp_path):
 
 
 def test_create_and_file_is_encrypted(vpath):
-    v = V.Vault.create(vpath, PW)
+    v = V.Vault.create(vpath, PW, kdf="scrypt")
     v.add_entry("Bank", "me", "SECRET-PASSWORD-XYZ", "https://bank.example", "my notes")
     raw = open(vpath, "rb").read()
     for needle in (b"SECRET-PASSWORD-XYZ", b"Bank", b"bank.example", b"my notes"):
@@ -129,7 +129,7 @@ def test_garbage_and_huge_kdf_rejected(vpath):
     open(vpath, "wb").write(b"")
     with pytest.raises(V.CorruptVaultError):
         V.Vault.open(vpath, PW)
-    V.Vault.create(vpath + "2", PW)
+    V.Vault.create(vpath + "2", PW, kdf="scrypt")
     d = json.load(open(vpath + "2")); d["kdf"]["n"] = 2 ** 30
     json.dump(d, open(vpath + "2", "w"))
     with pytest.raises(V.CorruptVaultError):

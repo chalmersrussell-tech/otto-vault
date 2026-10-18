@@ -52,7 +52,10 @@ you approved**, without asking each time, **only while OttoVault is unlocked**.
 1. Unlock OttoVault, click an entry.
 2. Tick **"Allow AI access to this password"** and press **Save**.
    The list shows a tick in the **AI** column.
-3. Untick + Save to revoke that entry at once, or use
+3. Each approval **expires** after 30 days by default (Settings > *AI access
+   approval lasts*: 30 days / 7 days / never, for new approvals). When it ends
+   the box is switched off and the request is refused until you tick it again.
+   Untick + Save to revoke that entry at once, or use
    **Settings > Revoke all AI access approvals...**.
 
 There is no command, file or API that can set the approval: only the app's
@@ -74,7 +77,9 @@ form can. New entries (including those added through the inbox or a CSV import) 
 4. If the vault is locked or the app is closed, nothing answers and
    `otto_get.py` reports *vault locked or not running* after ~30 s.
 
-Safeguards: requests older than 2 minutes are ignored; request files are
+Names are matched exactly after normalising: case, repeated spaces and
+look-alike (compatibility) forms are ignored; control and invisible characters
+are refused. Safeguards: requests older than 2 minutes are ignored; request files are
 size-limited; at most 30 successful releases per minute (more get *rate
 limited*) and a flood guard for any requests beyond 60 per minute; a repeated
 request id is answered once.
@@ -99,8 +104,12 @@ standard output; status text goes to standard error.
 ## Audit log
 **File > AI access log...** shows time, service and result (*released*,
 *denied*, *not found*, *ambiguous*, *rate limited*, plus *approved*/*revoked*
-changes) for the last 500 events. It is stored inside the encrypted vault and
-never contains a password.
+changes, *expired* and *revoked all*) for the last 500 events. Every grant and
+every revoke is recorded. It is stored inside the encrypted vault and never
+contains a password. Entries are chained with a keyed MAC and an outside
+anchor file checks the newest one, so an edited, deleted or rolled-back log
+produces a warning when you unlock (a "log integrity warning" event stays in
+the log). That detects silent edits; it cannot stop you deleting the vault.
 
 ## Security notes - please read
 * **This is a deliberate tradeoff.** While the vault is unlocked, any program
@@ -117,3 +126,5 @@ never contains a password.
   them back.
 * A request for a password you never approved shows in the status bar and in
   the log as *denied*.
+* Approvals expire (see above), which limits how long a forgotten approval can
+  be used. Shorter is safer: choose 7 days if you only need it occasionally.

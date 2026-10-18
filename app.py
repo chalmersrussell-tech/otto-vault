@@ -6,6 +6,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 import autotype as AT
+import lockout as L
 import settings as S
 import vault as V
 
@@ -15,6 +16,7 @@ SLEEP_GAP_SECS = 90          # a gap this long between timer ticks = PC was asle
 AUTOTYPE_COUNTDOWN = 3
 INBOX_CHECK_SECS = 15
 REQUEST_CHECK_SECS = 2         # AI password requests are answered quickly
+EXPIRY_CHOICES = ((30, "30 days (default)"), (7, "7 days"), (0, "Never expires"))
 IDLE_CHOICES = ((5, "5 minutes"), (15, "15 minutes"), (30, "30 minutes"),
                 (60, "60 minutes"), ("never", "Until I lock it or close the app"))
 NO_RECOVERY_WARNING = (
@@ -157,6 +159,8 @@ class App(tk.Tk):
         self.settings_path = S.settings_path_for(self.vault_path)
         self.settings = S.load_settings(self.settings_path)
         self.idle = S.IdleTracker(self.settings["idle_minutes"])
+        self.lockout = L.Lockout(L.lockout_path_for(self.vault_path))
+        self._lock_after = None
         self._last_tick = time.time()
         self._last_inbox_check = 0.0
         self._last_request_check = 0.0
@@ -227,6 +231,15 @@ class App(tk.Tk):
             return
         if not results:
             return
+        if any(res == "expired" for _t, res in results) and hasattr(self, "tree"):
+            self.refresh_list(select_id=self._selected_id)
+            if self._selected_id:             # keep the open form in step (box becomes unticked)
+                try:
+                    e = self.vault.get_entry(self._selected_id)
+                    self.otto_var.set(e["otto_approved"])
+                    self.expiry_text.set(self._expiry_text(e))
+                except KeyError:
+                    pass
         msgs = []
         for title, res in results:
             if res == V.R_RELEASED:
@@ -237,6 +250,8 @@ class App(tk.Tk):
                 msgs.append("An AI assistant asked for '%s' - not found." % title)
             elif res == V.R_AMBIGUOUS:
                 msgs.append("An AI assistant asked for '%s' - several entries match, refused." % title)
+            elif res == "expired":
+                msgs.append("AI access for '%s' expired - tick the box again to renew it." % title)
             elif res == V.R_RATE:
                 msgs.append("An AI assistant asked for '%s' - too many requests, refused." % title)
             else:
@@ -260,6 +275,18 @@ class App(tk.Tk):
         self.show_main()
         self._import_inbox()
         self._process_otto_requests()
+        if self.vault.kdf_upgraded:
+            self.status.set("Your vault's key protection was upgraded to Argon2id. "
+                            "(A copy of the old file was kept as vault.dat.pre-upgrade.bak.)")
+        warns = self.vault.integrity_warnings
+        if warns:
+            self.status.set("WARNING: AI access log integrity problem - see File > AI access log.")
+            messagebox.showwarning(
+                APP_NAME, "WARNING: the AI access log may have been tampered with.\n\n- "
+                          + "\n- ".join(warns) + "\n\nThe problem was recorded in the log as "
+                          "'log integrity warning'. If you did not restore an older backup "
+                          "or edit the vault yourself, treat this seriously: change your master "
+                          "password and review which entries have AI access.")
 
     def _clear(self):
         for w in self.container.winfo_children():
@@ -288,7 +315,11 @@ class App(tk.Tk):
             ttk.Label(outer, text="Master password:").pack(anchor="w")
             e1 = ttk.Entry(outer, textvariable=self.pw1, show="•", width=36)
             e1.pack(pady=4)
-            ttk.Button(outer, text="Unlock", command=self.do_unlock).pack(pady=8)
+            self.lock_msg = tk.StringVar()
+            ttk.Label(outer, textvariable=self.lock_msg, foreground="#b00020",
+                      wraplength=380, justify="left").pack()
+            self.unlock_btn = ttk.Button(outer, text="Unlock", command=self.do_unlock)
+            self.unlock_btn.pack(pady=8)
             ttk.Button(outer, text="Restore from a backup file...",
                        command=self.do_restore).pack()
             e1.bind("<Return>", lambda e: self.do_unlock())
@@ -311,6 +342,32 @@ class App(tk.Tk):
             e1.focus_set()
         ttk.Label(outer, text="Vault file: " + self.vault_path, foreground="#666",
                   wraplength=420).pack(pady=(16, 0))
+        if exists:
+            self._refresh_lockout()
+
+    def _refresh_lockout(self):
+        """Disable Unlock and show a countdown while the failed-attempt delay runs."""
+        if self._lock_after is not None:
+            try:
+                self.after_cancel(self._lock_after)
+            except Exception:
+                pass
+            self._lock_after = None
+        if not hasattr(self, "unlock_btn"):
+            return
+        try:
+            left = self.lockout.remaining()
+            if left > 0:
+                self.unlock_btn.state(["disabled"])
+                self.lock_msg.set("Too many wrong passwords. You can try again in %d:%02d."
+                                  % (left // 60, left % 60))
+                self._lock_after = self.after(1000, self._refresh_lockout)
+            else:
+                self.unlock_btn.state(["!disabled"])
+                if self.lock_msg.get().startswith("Too many"):
+                    self.lock_msg.set("")
+        except tk.TclError:
+            pass
 
     def do_create(self):
         a, b = self.pw1.get(), self.pw2.get()
@@ -328,7 +385,8 @@ class App(tk.Tk):
         self.config(cursor="watch")
         self.update_idletasks()
         try:
-            self.vault = V.Vault.create(self.vault_path, a)
+            self.vault = V.Vault.create(self.vault_path, a,
+                                        expiry_days=self.settings["ai_expiry_days"])
         except Exception as exc:
             messagebox.showerror(APP_NAME, "Could not create the vault:\n%s" % exc)
             return
@@ -338,25 +396,47 @@ class App(tk.Tk):
             self.pw2.set("")
         self._after_unlock()
 
+    def _wrong_password(self, what="Wrong master password."):
+        """Count a failed attempt and tell the user how it stands."""
+        delay = self.lockout.record_failure()
+        self.pw1.set("")
+        if delay:
+            self._refresh_lockout()
+            messagebox.showerror(APP_NAME, "%s\n\nToo many wrong passwords in a row: unlocking "
+                                 "is paused for %d seconds (it gets longer if you keep failing)."
+                                 % (what, delay))
+        else:
+            left = self.lockout.tries_left()
+            messagebox.showerror(APP_NAME, "%s Please try again.\n(%d more wrong %s before a "
+                                 "waiting time starts.)" % (what, left, "try" if left == 1 else "tries"))
+
     def do_unlock(self):
+        if self.lockout.remaining() > 0:
+            self._refresh_lockout()
+            return
         pw = self.pw1.get()
         self.config(cursor="watch")
         self.update_idletasks()
         try:
-            self.vault = V.Vault.open(self.vault_path, pw)
+            self.vault = V.Vault.open(self.vault_path, pw,
+                                      expiry_days=self.settings["ai_expiry_days"])
         except V.WrongPasswordError:
-            messagebox.showerror(APP_NAME, "Wrong master password. Please try again.")
-            self.pw1.set("")
+            self.config(cursor="")
+            self._wrong_password()
             return
         except V.VaultError as exc:
             messagebox.showerror(APP_NAME, str(exc))
             return
         finally:
             self.config(cursor="")
+        self.lockout.record_success()
         self.pw1.set("")
         self._after_unlock()
 
     def do_restore(self):
+        if self.lockout.remaining() > 0:      # restore must not become a password oracle
+            self._refresh_lockout()
+            return
         src = filedialog.askopenfilename(title="Choose a backup file")
         if not src:
             return
@@ -370,6 +450,9 @@ class App(tk.Tk):
             return
         try:
             V.Vault.restore_backup(src, self.vault_path, d.result[0])
+        except V.WrongPasswordError:
+            self._wrong_password("Wrong backup password.")
+            return
         except V.VaultError as exc:
             messagebox.showerror(APP_NAME, str(exc))
             return
@@ -398,6 +481,12 @@ class App(tk.Tk):
         for val, label in IDLE_CHOICES:
             sm.add_radiobutton(label=label, value=str(val), variable=self.idle_choice,
                                command=self.on_idle_choice)
+        sm.add_separator()
+        sm.add_command(label="AI access approval lasts (for new approvals):", state="disabled")
+        self.expiry_choice = tk.StringVar(value=str(self.settings["ai_expiry_days"]))
+        for val, label in EXPIRY_CHOICES:
+            sm.add_radiobutton(label=label, value=str(val), variable=self.expiry_choice,
+                               command=self.on_expiry_choice)
         sm.add_separator()
         sm.add_command(label="Revoke all AI access approvals...", command=self.do_revoke_all)
         m.add_cascade(label="Settings", menu=sm)
@@ -467,6 +556,10 @@ class App(tk.Tk):
                         variable=self.otto_var).grid(
             row=r, column=0, columnspan=3, sticky="w", pady=(8, 0))
         r += 1
+        self.expiry_text = tk.StringVar(value="")
+        ttk.Label(right, textvariable=self.expiry_text, foreground="#666").grid(
+            row=r, column=0, columnspan=3, sticky="w")
+        r += 1
         bb = ttk.Frame(right)
         bb.grid(row=r, column=0, columnspan=3, pady=10, sticky="w")
         ttk.Button(bb, text="Save", command=self.save_entry).pack(side="left")
@@ -506,6 +599,7 @@ class App(tk.Tk):
             v.set("")
         self.notes.delete("1.0", "end")
         self.otto_var.set(False)
+        self.expiry_text.set("")
         self.show_var.set(False)
         self.toggle_show()
 
@@ -523,6 +617,7 @@ class App(tk.Tk):
         self.notes.delete("1.0", "end")
         self.notes.insert("1.0", e["notes"])
         self.otto_var.set(e["otto_approved"])
+        self.expiry_text.set(self._expiry_text(e))
         self.show_var.set(False)
         self.toggle_show()
 
@@ -552,6 +647,7 @@ class App(tk.Tk):
             return
         self._selected_id = eid
         self.refresh_list(select_id=eid)
+        self.expiry_text.set(self._expiry_text(self.vault.get_entry(eid)))
         self.status.set("Saved. AI assistants may use this password without asking."
                         if d["otto_approved"] else "Saved.")
 
@@ -615,6 +711,7 @@ class App(tk.Tk):
         self.refresh_list(select_id=self._selected_id)
         if self._selected_id:
             self.otto_var.set(False)
+            self.expiry_text.set("")
         self.status.set("All AI access approvals were revoked.")
 
     def show_otto_log(self):
@@ -626,6 +723,26 @@ class App(tk.Tk):
             except tk.TclError:
                 self._log_win = None
         self._log_win = OttoLogWindow(self)
+
+    def on_expiry_choice(self):
+        val = S.normalize_expiry(int(self.expiry_choice.get()))
+        self.settings["ai_expiry_days"] = val
+        if self.vault is not None:
+            self.vault.expiry_days = val
+        try:
+            S.save_settings(self.settings_path, self.settings)
+        except OSError as exc:
+            messagebox.showerror(APP_NAME, "Could not save the setting: %s" % exc)
+            return
+        self.status.set("New AI access approvals will last: %s (existing ones keep their date)."
+                        % dict((str(k), l) for k, l in EXPIRY_CHOICES)[str(val)].replace(" (default)", ""))
+
+    def _expiry_text(self, e=None):
+        if e is None or not e.get("otto_approved"):
+            return ""
+        exp = e.get("otto_expires")
+        return ("AI access ends " + time.strftime("%Y-%m-%d", time.localtime(exp))
+                if exp else "AI access has no end date")
 
     # --------------------------------------------------------------- auto-type
     def do_autotype(self, mode="both"):

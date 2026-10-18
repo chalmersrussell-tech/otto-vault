@@ -171,7 +171,7 @@ def test_stale_request_ignored(v):
     res = v.process_requests(now=1000 + V.REQUEST_MAX_AGE + 5)
     assert res == [] and answer(v, old) is None
     assert os.listdir(V.request_dir_for(v.path)) == []       # dropped
-    assert [r["result"] for r in v.otto_log()] == ["approved"]   # nothing released/denied
+    assert [r["result"].split(" ")[0] for r in v.otto_log()] == ["approved"]   # nothing released/denied
     future = file_request(v, "Svc", now=5000 + 600)
     assert v.process_requests(now=5000) == [] and answer(v, future) is None
 
@@ -265,7 +265,7 @@ def test_approval_changes_are_logged(v):
     v.update_entry(eid, otto_approved=True)
     v.update_entry(eid, notes="n")            # no change -> no extra log line
     v.update_entry(eid, otto_approved=False)
-    assert [(r["title"], r["result"]) for r in v.otto_log()] == [
+    assert [(r["title"], r["result"].split(" ")[0]) for r in v.otto_log()] == [
         ("Svc", "revoked"), ("Svc", "approved")]
 
 

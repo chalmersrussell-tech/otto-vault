@@ -23,7 +23,7 @@ def test_save_and_load_roundtrip(tmp_path):
         assert S.load_settings(p)["idle_minutes"] == val
     assert [f for f in os.listdir(os.path.dirname(p)) if f.endswith(".tmp")] == []
     doc = json.load(open(p))
-    assert set(doc) == {"version", "idle_minutes"}      # only non-secret prefs
+    assert set(doc) == {"version", "idle_minutes", "ai_expiry_days"}      # only non-secret prefs
 
 
 @pytest.mark.parametrize("raw", [b"", b"{not json", b"[1,2]", b'{"idle_minutes": 7}',
