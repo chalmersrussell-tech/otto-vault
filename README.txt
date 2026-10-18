@@ -1,4 +1,4 @@
-OTTOVAULT 1.1.0 - a free password manager that lives only on your PC
+OTTOVAULT 1.2.0 - a free password manager that lives only on your PC
 ================================================================
 No cloud. No internet use. No account. No subscription. No tracking.
 Your passwords are stored in one encrypted file on this computer.
@@ -74,6 +74,28 @@ you a NEW entry in %APPDATA%\OttoVault\inbox\ - encrypted so that only your
 unlocked OttoVault can read it. Otto never sees your master password or your
 vault. Next time OttoVault is unlocked it adds the entry, deletes the file and
 says "Imported 1 entry from Otto". Files it cannot read are renamed *.bad.
+
+LET OTTO USE SOME PASSWORDS (standing approval) - NEW in 1.2
+-----------------------------------------------------------
+This is OPTIONAL and OFF for every entry until you turn it on.
+* In an entry, tick "Let Otto use this password (standing approval)" and
+  click Save. A tick mark appears in the "Otto" column of the list.
+* While OttoVault is UNLOCKED, Otto (the helper program otto_get.py) can ask
+  for the password of that one service, by exact name, without asking you
+  again. Entries that are not ticked are always refused.
+* When OttoVault is locked or closed, nobody gets anything: it only answers
+  while it is unlocked. Your master password is never stored or shown.
+* File > Otto access log... lists every request (time, service, released /
+  denied / not found). Passwords are never written in the log. The log and
+  the approvals live inside your encrypted vault.
+* Untick the box and Save to take back one approval immediately.
+  Settings > Revoke all of Otto's approvals... removes all of them.
+* The status line tells you when Otto asked ("Otto asked for X - not approved").
+* Entries Otto adds through the inbox are NEVER pre-approved; you tick them.
+Honest tradeoff: while the vault is unlocked, ANY program running as your
+Windows user could also file a request for an approved entry. So approve only
+the services you want automated, and lock the vault (File > Lock now) when
+you are away. See OTTO_USAGE.md.
 
 EVERYDAY USE
 ------------
@@ -157,5 +179,6 @@ HOW TO TEST IT (5 minutes, uses a fake entry)
 FOR DEVELOPERS: tests
 ---------------------
   py -m pip install pytest
-  py -m pytest tests          (61 tests)
+  py -m pytest tests          (95 tests)
+  otto_get.py asks the unlocked app for an approved password (status only unless --print)
   otto_add.py queues an inbox entry:  py otto_add.py --service "Name" --generate-username --generate-password

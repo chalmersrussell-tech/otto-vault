@@ -13,8 +13,10 @@ Nothing secret is ever written to disk in plain text and nothing is logged.
 import base64
 import copy
 import csv
+import collections
 import json
 import os
+import re
 import secrets
 import shutil
 import string
@@ -32,7 +34,7 @@ from cryptography.hazmat.primitives.serialization import (
     Encoding, NoEncryption, PrivateFormat, PublicFormat)
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 FORMAT_NAME = "OttoVault"
 FORMAT_VERSION = 1
@@ -47,6 +49,7 @@ MAX_KDF_N = 2 ** 20      # refuse absurd values from a hostile file
 MAX_FILE_BYTES = 64 * 1024 * 1024
 
 FIELDS = ("title", "username", "password", "url", "notes")
+FLAG_FIELDS = ("otto_approved",)     # booleans stored with each entry
 
 
 class VaultError(Exception):
@@ -283,6 +286,173 @@ def inbox_open(private_key, blob):
         raise VaultError("Inbox message could not be read.") from exc
 
 
+# ------------------------------------------------- Otto standing approvals
+# Request/response mailbox that lets Otto read the password of an entry the
+# owner has explicitly approved (checkbox on the entry, GUI only). It works
+# ONLY while the vault is unlocked: the app answers requests from memory, so
+# the master password is never stored anywhere.
+#
+#   requests\<id>.ottoreq   written by otto_get.py (service name, an ephemeral
+#                           X25519 public key, a timestamp). Contains no secret.
+#   responses\<id>.ottoresp written by the unlocked app. EVERY response (also a
+#                           denial) is encrypted to the request's ephemeral key
+#                           and authenticated with the vault's own key pair
+#                           (two Diffie-Hellman results mixed by HKDF), so a
+#                           third program can neither read nor forge one.
+REQUESTS_DIRNAME = "requests"
+RESPONSES_DIRNAME = "responses"
+REQUEST_EXT = ".ottoreq"
+RESPONSE_EXT = ".ottoresp"
+REQUEST_FORMAT = "OttoVault-request"
+RESPONSE_FORMAT = "OttoVault-response"
+_RESPONSE_INFO = b"OttoVault response v1"
+REQUEST_MAX_BYTES = 4096
+RESPONSE_MAX_BYTES = 64 * 1024
+REQUEST_MAX_AGE = 120            # seconds; older requests are ignored
+REQUEST_MAX_FUTURE = 60          # clock-skew allowance
+RESPONSE_MAX_AGE = 300           # leftover response files are swept after this
+MAX_NAME_LEN = 200
+MAX_RELEASES_PER_MIN = 30        # successful password releases
+MAX_REQUESTS_PER_MIN = 60        # all requests (flood guard)
+MAX_REQUESTS_PER_POLL = 25
+OTTO_LOG_MAX = 500
+_REQ_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+
+# result words used in responses and in the audit log
+R_RELEASED = "released"
+R_DENIED = "denied"
+R_NOT_FOUND = "not found"
+R_AMBIGUOUS = "ambiguous"
+R_RATE = "rate limited"
+
+
+def request_dir_for(vault_path):
+    return os.path.join(os.path.dirname(os.path.abspath(vault_path)), REQUESTS_DIRNAME)
+
+
+def response_dir_for(vault_path):
+    return os.path.join(os.path.dirname(os.path.abspath(vault_path)), RESPONSES_DIRNAME)
+
+
+def _clean_text(s, limit=100):
+    """Printable, single-line, length-limited copy of untrusted text."""
+    s = "".join(ch if ch.isprintable() else " " for ch in str(s))
+    return s.strip()[:limit]
+
+
+def _raw_pub(priv):
+    return priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+
+
+def make_request(service, username="", now=None):
+    """Build a request. Returns {"id", "blob", "eph_private"}; keep eph_private
+    in memory only - it is the only key that can open the answer."""
+    service = (service or "").strip()
+    username = (username or "").strip()
+    if not service or len(service) > MAX_NAME_LEN or len(username) > MAX_NAME_LEN:
+        raise VaultError("Service/username must be 1-%d characters." % MAX_NAME_LEN)
+    eph = X25519PrivateKey.generate()
+    rid = secrets.token_hex(16)
+    doc = {"format": REQUEST_FORMAT, "version": 1, "id": rid, "service": service,
+           "username": username, "eph": _b64e(_raw_pub(eph)),
+           "ts": int(time.time() if now is None else now)}
+    return {"id": rid, "blob": json.dumps(doc).encode("utf-8"),
+            "eph_private": eph.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())}
+
+
+def parse_request(blob, now=None):
+    """Validate a request file. Returns the dict, or raises VaultError (bad)
+    or StaleRequest (well-formed but too old/new)."""
+    now = time.time() if now is None else now
+    try:
+        if len(blob) > REQUEST_MAX_BYTES:
+            raise ValueError
+        doc = json.loads(blob.decode("utf-8"))
+        if doc.get("format") != REQUEST_FORMAT or doc.get("version") != 1:
+            raise ValueError
+        rid, svc, usr = doc["id"], doc["service"], doc.get("username", "")
+        if not isinstance(rid, str) or not _REQ_ID_RE.match(rid):
+            raise ValueError
+        if not isinstance(svc, str) or not isinstance(usr, str):
+            raise ValueError
+        svc, usr = svc.strip(), usr.strip()
+        if not svc or len(svc) > MAX_NAME_LEN or len(usr) > MAX_NAME_LEN:
+            raise ValueError
+        ts = doc["ts"]
+        if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+            raise ValueError
+        eph = _b64d(doc["eph"])
+        if len(eph) != 32:
+            raise ValueError
+        X25519PublicKey.from_public_bytes(eph)
+    except Exception as exc:
+        raise VaultError("Request is not valid.") from exc
+    if now - ts > REQUEST_MAX_AGE or ts - now > REQUEST_MAX_FUTURE:
+        raise StaleRequest("Request is too old.")
+    return {"id": rid, "service": svc, "username": usr, "eph": eph, "ts": ts}
+
+
+class StaleRequest(VaultError):
+    pass
+
+
+def _response_key(shared1, shared2, req_eph, resp_eph, vault_pub):
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=req_eph + resp_eph + vault_pub,
+                info=_RESPONSE_INFO).derive(shared1 + shared2)
+
+
+def _response_aad(rid, resp_eph_b64):
+    return ("%s|1|%s|%s" % (RESPONSE_FORMAT, rid, resp_eph_b64)).encode("ascii")
+
+
+def response_seal(vault_private, req_eph_pub, rid, payload):
+    """Encrypt a response dict to the requester's ephemeral public key and
+    authenticate it with the vault's static key (vault_private, 32 bytes)."""
+    static = X25519PrivateKey.from_private_bytes(vault_private)
+    peer = X25519PublicKey.from_public_bytes(req_eph_pub)
+    r = X25519PrivateKey.generate()
+    r_pub = _raw_pub(r)
+    key = _response_key(r.exchange(peer), static.exchange(peer), req_eph_pub, r_pub,
+                        _raw_pub(static))
+    nonce = secrets.token_bytes(NONCE_LEN)
+    r_b64 = _b64e(r_pub)
+    body = dict(payload)
+    body["id"] = rid
+    ct = AESGCM(key).encrypt(nonce, json.dumps(body).encode("utf-8"),
+                             _response_aad(rid, r_b64))
+    doc = {"format": RESPONSE_FORMAT, "version": 1, "id": rid, "eph": r_b64,
+           "nonce": _b64e(nonce), "ciphertext": _b64e(ct)}
+    return json.dumps(doc).encode("utf-8")
+
+
+def response_open(req_eph_private, vault_public, blob, rid):
+    """Decrypt + verify a response with the request's ephemeral private key and
+    the vault's public key (inbox_public.key). Raises VaultError on any
+    problem (wrong key, forged, tampered, wrong request id)."""
+    try:
+        if len(blob) > RESPONSE_MAX_BYTES:
+            raise ValueError
+        doc = json.loads(blob.decode("utf-8"))
+        if (doc.get("format") != RESPONSE_FORMAT or doc.get("version") != 1
+                or doc.get("id") != rid):
+            raise ValueError
+        r_pub = _b64d(doc["eph"])
+        nonce = _b64d(doc["nonce"])
+        ct = _b64d(doc["ciphertext"])
+        mine = X25519PrivateKey.from_private_bytes(req_eph_private)
+        my_pub = _raw_pub(mine)
+        key = _response_key(mine.exchange(X25519PublicKey.from_public_bytes(r_pub)),
+                            mine.exchange(X25519PublicKey.from_public_bytes(vault_public)),
+                            my_pub, r_pub, vault_public)
+        body = json.loads(AESGCM(key).decrypt(nonce, ct, _response_aad(rid, doc["eph"]))
+                          .decode("utf-8"))
+        if not isinstance(body, dict) or body.get("id") != rid or "status" not in body:
+            raise ValueError
+        return body
+    except Exception as exc:
+        raise VaultError("Response could not be verified or decrypted.") from exc
+
+
 # --------------------------------------------------------------- generator
 SYMBOLS = "!@#$%^&*()-_=+[]{};:,.?/"
 
@@ -365,6 +535,18 @@ class Vault:
         self._data = data
         self._key = key
         self._kdf = kdf
+        self._release_times = collections.deque()   # Otto rate limiting (memory only)
+        self._request_times = collections.deque()
+        self._req_seen = collections.OrderedDict()
+        self._migrate()
+
+    def _migrate(self):
+        """Older vaults/entries have no Otto fields: approval defaults to False.
+        Only the literal value True counts as approved."""
+        for e in self._data.get("entries", []):
+            e["otto_approved"] = e.get("otto_approved") is True
+        if not isinstance(self._data.get("otto_log"), list):
+            self._data["otto_log"] = []
 
     # --- creation / opening
     @staticmethod
@@ -395,7 +577,10 @@ class Vault:
     def lock(self):
         """Forget the key and data (best effort - Python can't truly wipe)."""
         self._key = b""
-        self._data = {"entries": []}
+        self._data = {"entries": [], "otto_log": []}
+        self._release_times.clear()
+        self._request_times.clear()
+        self._req_seen.clear()
 
     @property
     def locked(self):
@@ -419,11 +604,16 @@ class Vault:
         now = int(time.time())
         return {"id": uuid.uuid4().hex, "title": title, "username": username or "",
                 "password": password or "", "url": (url or "").strip(),
-                "notes": notes or "", "created": now, "modified": now}
+                "notes": notes or "", "otto_approved": False,
+                "created": now, "modified": now}
 
-    def add_entry(self, title, username="", password="", url="", notes="", save=True):
+    def add_entry(self, title, username="", password="", url="", notes="",
+                  otto_approved=False, save=True):
         e = self._new_entry(title, username, password, url, notes)
+        e["otto_approved"] = otto_approved is True
         self._data["entries"].append(e)
+        if e["otto_approved"]:
+            self._log_otto(e["title"], "approved")
         if save:
             self.save()
         return e["id"]
@@ -433,14 +623,20 @@ class Vault:
             if e["id"] == entry_id:
                 new = dict(e)
                 for k, val in fields.items():
-                    if k not in FIELDS:
+                    if k in FLAG_FIELDS:
+                        new[k] = val is True
+                    elif k in FIELDS:
+                        new[k] = val if val is not None else ""
+                    else:
                         raise VaultError("Unknown field: %s" % k)
-                    new[k] = val if val is not None else ""
                 new["title"] = new["title"].strip()
                 if not new["title"]:
                     raise VaultError("Title is required.")
                 new["modified"] = int(time.time())
+                was = e.get("otto_approved") is True
                 e.update(new)
+                if new["otto_approved"] != was:
+                    self._log_otto(new["title"], "approved" if new["otto_approved"] else "revoked")
                 self.save()
                 return
         raise KeyError(entry_id)
@@ -556,6 +752,147 @@ class Vault:
             except OSError:
                 pass
         return added, bad
+
+    # --- Otto standing approvals (see section above)
+    def approved_count(self):
+        return sum(1 for e in self._data["entries"] if e.get("otto_approved") is True)
+
+    def revoke_all_otto(self):
+        """Remove every standing approval. Returns how many were revoked."""
+        n = 0
+        for e in self._data["entries"]:
+            if e.get("otto_approved") is True:
+                e["otto_approved"] = False
+                n += 1
+        self._log_otto("(all entries)", "revoked all (%d)" % n)
+        self.save()
+        return n
+
+    def otto_log(self):
+        """Newest first: [{'t': epoch, 'title': str, 'result': str}] - never a password."""
+        return list(reversed(copy.deepcopy(self._data["otto_log"])))
+
+    def _log_otto(self, title, result, now=None):
+        log = self._data["otto_log"]
+        log.append({"t": int(time.time() if now is None else now),
+                    "title": _clean_text(title), "result": result})
+        del log[:-OTTO_LOG_MAX]
+
+    def process_requests(self, requests_dir=None, responses_dir=None, now=None):
+        """Answer waiting *.ottoreq files. Only works while unlocked (a locked
+        vault does nothing, so requests simply time out). Returns a list of
+        (service title, result) for the status bar. Never writes a plaintext
+        password anywhere: released passwords are only in the encrypted
+        response file."""
+        if self.locked:
+            return []
+        now = time.time() if now is None else now
+        rdir = requests_dir or request_dir_for(self.path)
+        odir = responses_dir or response_dir_for(self.path)
+        if not os.path.isdir(rdir):
+            return []
+        try:
+            names = sorted(n for n in os.listdir(rdir) if n.endswith(REQUEST_EXT))
+        except OSError:
+            return []
+        self._sweep_responses(odir, now)
+        results = []
+        if not names:
+            return results
+        self.ensure_inbox_keypair()
+        priv = base64.b64decode(self._data["inbox"]["private_key"])
+        logged = False
+        for name in names[:MAX_REQUESTS_PER_POLL]:
+            fp = os.path.join(rdir, name)
+            try:
+                if os.path.getsize(fp) > REQUEST_MAX_BYTES:
+                    raise VaultError("too large")
+                with open(fp, "rb") as f:
+                    req = parse_request(f.read(REQUEST_MAX_BYTES + 1), now)
+            except VaultError:                # bad, oversized or stale: just drop it
+                self._remove(fp)
+                continue
+            except OSError:
+                continue
+            if req["id"] in self._req_seen:   # replay / failed deletion earlier
+                self._remove(fp)
+                continue
+            while self._request_times and now - self._request_times[0] > 60:
+                self._request_times.popleft()
+            if len(self._request_times) >= MAX_REQUESTS_PER_MIN:
+                self._remove(fp)              # flood: no answer, no log spam
+                results.append(("", "flood"))
+                continue
+            self._request_times.append(now)
+            status, entry = self._decide(req, now)
+            payload = {"status": status}
+            title = entry["title"] if entry else req["service"]
+            if status == R_RELEASED:
+                payload.update(password=entry["password"], username=entry["username"],
+                               title=entry["title"])
+            try:
+                os.makedirs(odir, exist_ok=True)
+                blob = response_seal(priv, req["eph"], req["id"], payload)
+                _atomic_write(os.path.join(odir, req["id"] + RESPONSE_EXT), blob,
+                              keep_backup=False)
+            except (OSError, ValueError):
+                if status == R_RELEASED:      # nothing was handed out
+                    self._release_times.pop()
+                continue
+            finally:
+                payload.clear()
+            self._req_seen[req["id"]] = True
+            while len(self._req_seen) > 1000:
+                self._req_seen.popitem(last=False)
+            self._log_otto(title, status, now)
+            logged = True
+            results.append((_clean_text(title, 60), status))
+            self._remove(fp)
+        if logged:
+            try:
+                self.save()
+            except OSError:
+                pass
+        return results
+
+    def _decide(self, req, now):
+        svc = req["service"].casefold()
+        usr = req["username"].casefold()
+        hits = [e for e in self._data["entries"]
+                if e["title"].strip().casefold() == svc
+                and (not usr or e["username"].strip().casefold() == usr)]
+        if not hits:
+            return R_NOT_FOUND, None
+        if len(hits) > 1:
+            return R_AMBIGUOUS, None
+        e = hits[0]
+        if e.get("otto_approved") is not True:
+            return R_DENIED, e
+        while self._release_times and now - self._release_times[0] > 60:
+            self._release_times.popleft()
+        if len(self._release_times) >= MAX_RELEASES_PER_MIN:
+            return R_RATE, e
+        self._release_times.append(now)
+        return R_RELEASED, e
+
+    @staticmethod
+    def _remove(fp):
+        try:
+            os.remove(fp)
+        except OSError:
+            pass
+
+    @staticmethod
+    def _sweep_responses(odir, now):
+        """Delete response files nobody picked up (they are encrypted anyway)."""
+        try:
+            for n in os.listdir(odir):
+                if n.endswith(RESPONSE_EXT):
+                    fp = os.path.join(odir, n)
+                    if now - os.path.getmtime(fp) > RESPONSE_MAX_AGE:
+                        os.remove(fp)
+        except OSError:
+            pass
 
     # --- CSV import
     def import_csv(self, csv_path):

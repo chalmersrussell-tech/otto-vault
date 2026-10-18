@@ -66,6 +66,49 @@ assert any("Imported 1 entry from Otto" in m for m in shown), shown
 assert os.listdir(inbox) == []
 a.search_var.set("fromotto"); a.update(); assert len(a.tree.get_children()) == 1
 
+# ---- Otto standing approval (checkbox, request answering, revoke, log)
+def otto_ask(service):
+    req = V.make_request(service)
+    d = V.request_dir_for(path); os.makedirs(d, exist_ok=True)
+    open(os.path.join(d, req["id"] + V.REQUEST_EXT), "wb").write(req["blob"])
+    pump(A.REQUEST_CHECK_SECS + 2.5)
+    rp = os.path.join(V.response_dir_for(path), req["id"] + V.RESPONSE_EXT)
+    if not os.path.exists(rp):
+        return None
+    return V.response_open(req["eph_private"], V.read_public_key_file(V.public_key_path_for(path)),
+                           open(rp, "rb").read(), req["id"])
+
+a.search_var.set(""); a.update()
+tid = [i for i in a.tree.get_children() if a.vault.get_entry(i)["title"] == "Test"][0]
+a.tree.selection_set(tid); a.update()
+assert a.otto_var.get() is False and a.tree.set(tid, "otto") == ""
+assert otto_ask("Test")["status"] == "denied"
+assert "Otto asked for 'Test' - not approved" in a.status.get(), a.status.get()
+a.otto_var.set(True); a.save_entry(); a.update()
+assert a.vault.get_entry(tid)["otto_approved"] is True and a.tree.set(tid, "otto") == "\u2713"
+assert "approved for Otto" in a.status.get() or "Otto may use" in a.status.get()
+body = otto_ask("test")
+assert body["status"] == "released" and body["password"] == "p4ss!", body
+a.tree.selection_set(()); a.update(); a.tree.selection_set(tid); a.update()
+assert a.otto_var.get() is True                      # checkbox reloads from the vault
+a.show_otto_log(); a.update()
+assert a._log_win is not None and len(a._log_win.tree.get_children()) >= 3
+a._log_win._close(); a.update()
+a.otto_var.set(False); a.save_entry(); a.update()    # untick = immediate revoke
+assert otto_ask("Test")["status"] == "denied"
+a.otto_var.set(True); a.save_entry(); a.update()
+assert otto_ask("Test")["status"] == "released"
+a.do_revoke_all(); a.update()
+assert a.vault.approved_count() == 0 and a.otto_var.get() is False
+assert otto_ask("Test")["status"] == "denied"
+assert otto_ask("No such service")["status"] == "not found"
+# a locked app never answers
+a.otto_var.set(True); a.save_entry(); a.update()
+a.lock(); a.update()
+assert otto_ask("Test") is None, "answered while locked!"
+a.pw1.set("throwaway-test-pw"); a.do_unlock(); a.update()
+print("otto approval GUI OK")
+
 # auto-type flow with mocked SendInput + short countdown
 A.AUTOTYPE_COUNTDOWN = 1
 a.search_var.set("")

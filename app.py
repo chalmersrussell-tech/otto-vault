@@ -14,6 +14,7 @@ CLIPBOARD_CLEAR_SECS = 20
 SLEEP_GAP_SECS = 90          # a gap this long between timer ticks = PC was asleep
 AUTOTYPE_COUNTDOWN = 3
 INBOX_CHECK_SECS = 15
+REQUEST_CHECK_SECS = 2         # Otto password requests are answered quickly
 IDLE_CHOICES = ((5, "5 minutes"), (15, "15 minutes"), (30, "30 minutes"),
                 (60, "60 minutes"), ("never", "Until I lock it or close the app"))
 NO_RECOVERY_WARNING = (
@@ -106,6 +107,45 @@ class GeneratorDialog(tk.Toplevel):
         self.destroy()
 
 
+class OttoLogWindow(tk.Toplevel):
+    """Read-only view of the audit log kept inside the encrypted vault."""
+
+    def __init__(self, app):
+        super().__init__(app)
+        self.app = app
+        self.title("Otto access log")
+        self.geometry("560x380")
+        self.transient(app)
+        ttk.Label(self, text="Every time Otto asked for a password (newest first). "
+                             "Passwords are never recorded.", padding=8).pack(anchor="w")
+        self.tree = ttk.Treeview(self, columns=("time", "service", "result"),
+                                 show="headings")
+        for c, w in (("time", 140), ("service", 260), ("result", 130)):
+            self.tree.heading(c, text=c.capitalize())
+            self.tree.column(c, width=w)
+        self.tree.pack(fill="both", expand=True, padx=8)
+        bar = ttk.Frame(self, padding=8)
+        bar.pack(fill="x")
+        ttk.Button(bar, text="Close", command=self._close).pack(side="right")
+        ttk.Button(bar, text="Refresh", command=self.reload).pack(side="right", padx=6)
+        self.protocol("WM_DELETE_WINDOW", self._close)
+        self.reload()
+
+    def _close(self):
+        self.app._log_win = None
+        self.destroy()
+
+    def reload(self):
+        for i in self.tree.get_children():
+            self.tree.delete(i)
+        if self.app.vault is None or self.app.vault.locked:
+            return
+        for r in self.app.vault.otto_log():
+            self.tree.insert("", "end", values=(
+                time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["t"])),
+                r["title"], r["result"]))
+
+
 class App(tk.Tk):
     def __init__(self, vault_path=None):
         super().__init__()
@@ -119,6 +159,8 @@ class App(tk.Tk):
         self.idle = S.IdleTracker(self.settings["idle_minutes"])
         self._last_tick = time.time()
         self._last_inbox_check = 0.0
+        self._last_request_check = 0.0
+        self._log_win = None
         self._countdown_win = None
         self._clip_token = None
         self._selected_id = None
@@ -145,9 +187,13 @@ class App(tk.Tk):
             elif self.idle.expired():
                 self.lock("Locked automatically after %s minutes of no activity."
                           % self.idle.minutes)
-            elif now - self._last_inbox_check > INBOX_CHECK_SECS:
-                self._last_inbox_check = now
-                self._import_inbox(quiet=True)
+            else:
+                if now - self._last_request_check >= REQUEST_CHECK_SECS:
+                    self._last_request_check = now
+                    self._process_otto_requests()
+                if now - self._last_inbox_check > INBOX_CHECK_SECS:
+                    self._last_inbox_check = now
+                    self._import_inbox(quiet=True)
         self.after(1000, self._tick)
 
     def _import_inbox(self, quiet=False):
@@ -170,6 +216,39 @@ class App(tk.Tk):
             if added and not quiet:
                 messagebox.showinfo(APP_NAME, msg.strip())
 
+    def _process_otto_requests(self):
+        """Answer Otto's password requests (only approved entries are released;
+        everything is logged inside the vault). Runs only while unlocked."""
+        if self.vault is None or self.vault.locked:
+            return
+        try:
+            results = self.vault.process_requests()
+        except Exception:
+            return
+        if not results:
+            return
+        msgs = []
+        for title, res in results:
+            if res == V.R_RELEASED:
+                msgs.append("Otto used the password for '%s'." % title)
+            elif res == V.R_DENIED:
+                msgs.append("Otto asked for '%s' - not approved." % title)
+            elif res == V.R_NOT_FOUND:
+                msgs.append("Otto asked for '%s' - not found." % title)
+            elif res == V.R_AMBIGUOUS:
+                msgs.append("Otto asked for '%s' - several entries match, refused." % title)
+            elif res == V.R_RATE:
+                msgs.append("Otto asked for '%s' - too many requests, refused." % title)
+            else:
+                msgs.append("Too many requests from Otto - some were ignored.")
+        if hasattr(self, "status"):
+            self.status.set(" ".join(msgs[-3:]))
+        if self._log_win is not None:
+            try:
+                self._log_win.reload()
+            except Exception:
+                pass
+
     def _after_unlock(self):
         """Run right after a successful create/unlock."""
         self.idle.touch()
@@ -180,6 +259,7 @@ class App(tk.Tk):
             messagebox.showwarning(APP_NAME, "Could not set up the Otto inbox key:\n%s" % exc)
         self.show_main()
         self._import_inbox()
+        self._process_otto_requests()
 
     def _clear(self):
         for w in self.container.winfo_children():
@@ -305,6 +385,7 @@ class App(tk.Tk):
         fm = tk.Menu(m, tearoff=0)
         fm.add_command(label="Import from CSV...", command=self.do_import)
         fm.add_command(label="Export encrypted backup...", command=self.do_export)
+        fm.add_command(label="Otto access log...", command=self.show_otto_log)
         fm.add_separator()
         fm.add_command(label="Change master password...", command=self.do_change_pw)
         fm.add_command(label="Lock now", command=lambda: self.lock())
@@ -317,6 +398,8 @@ class App(tk.Tk):
         for val, label in IDLE_CHOICES:
             sm.add_radiobutton(label=label, value=str(val), variable=self.idle_choice,
                                command=self.on_idle_choice)
+        sm.add_separator()
+        sm.add_command(label="Revoke all of Otto's approvals...", command=self.do_revoke_all)
         m.add_cascade(label="Settings", menu=sm)
         self.config(menu=m)
 
@@ -337,11 +420,12 @@ class App(tk.Tk):
         ttk.Button(top, text="Clear", command=lambda: self.search_var.set("")).pack(side="left")
         ttk.Button(top, text="+ New entry", command=self.new_entry).pack(side="left", padx=(8, 0))
 
-        cols = ("title", "username", "url")
+        cols = ("title", "username", "url", "otto")
         self.tree = ttk.Treeview(left, columns=cols, show="headings", selectmode="browse")
-        for c, w in (("title", 200), ("username", 160), ("url", 220)):
+        for c, w in (("title", 200), ("username", 150), ("url", 200), ("otto", 50)):
             self.tree.heading(c, text=c.capitalize())
-            self.tree.column(c, width=w)
+            self.tree.column(c, width=w, anchor="center" if c == "otto" else "w",
+                             stretch=c != "otto")
         sb = ttk.Scrollbar(left, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y", pady=(8, 0))
@@ -378,6 +462,11 @@ class App(tk.Tk):
         self.notes = tk.Text(right, width=34, height=7, wrap="word")
         self.notes.grid(row=r, column=0, columnspan=3, sticky="we")
         r += 1
+        self.otto_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(right, text="Let Otto use this password (standing approval)",
+                        variable=self.otto_var).grid(
+            row=r, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        r += 1
         bb = ttk.Frame(right)
         bb.grid(row=r, column=0, columnspan=3, pady=10, sticky="w")
         ttk.Button(bb, text="Save", command=self.save_entry).pack(side="left")
@@ -403,16 +492,20 @@ class App(tk.Tk):
         for i in self.tree.get_children():
             self.tree.delete(i)
         for e in self.vault.search(self.search_var.get()):
-            self.tree.insert("", "end", iid=e["id"], values=(e["title"], e["username"], e["url"]))
+            self.tree.insert("", "end", iid=e["id"], values=(
+                e["title"], e["username"], e["url"], "\u2713" if e["otto_approved"] else ""))
         if select_id and self.tree.exists(select_id):
             self.tree.selection_set(select_id)
-        self.status.set("%d entries" % len(self.tree.get_children()))
+        n = self.vault.approved_count()
+        self.status.set("%d entries" % len(self.tree.get_children())
+                        + ("  -  %d approved for Otto" % n if n else ""))
 
     def clear_form(self):
         self._selected_id = None
         for v in self.f.values():
             v.set("")
         self.notes.delete("1.0", "end")
+        self.otto_var.set(False)
         self.show_var.set(False)
         self.toggle_show()
 
@@ -429,6 +522,7 @@ class App(tk.Tk):
             self.f[k].set(e[k])
         self.notes.delete("1.0", "end")
         self.notes.insert("1.0", e["notes"])
+        self.otto_var.set(e["otto_approved"])
         self.show_var.set(False)
         self.toggle_show()
 
@@ -439,6 +533,7 @@ class App(tk.Tk):
     def _form(self):
         d = {k: v.get() for k, v in self.f.items()}
         d["notes"] = self.notes.get("1.0", "end-1c")
+        d["otto_approved"] = bool(self.otto_var.get())
         return d
 
     def save_entry(self):
@@ -457,7 +552,8 @@ class App(tk.Tk):
             return
         self._selected_id = eid
         self.refresh_list(select_id=eid)
-        self.status.set("Saved.")
+        self.status.set("Saved. Otto may use this password without asking."
+                        if d["otto_approved"] else "Saved.")
 
     def delete_entry(self):
         if not self._selected_id:
@@ -499,6 +595,37 @@ class App(tk.Tk):
             self.status.set("Saved: stay unlocked = %s" % dict((str(k), l) for k, l in IDLE_CHOICES)[str(val)])
         except OSError as exc:
             messagebox.showerror(APP_NAME, "Could not save the setting: %s" % exc)
+
+    # -------------------------------------------------------------- Otto access
+    def do_revoke_all(self):
+        n = self.vault.approved_count()
+        if not n:
+            messagebox.showinfo(APP_NAME, "No entries are approved for Otto.")
+            return
+        if not messagebox.askyesno(
+                APP_NAME, "Remove Otto's standing approval from all %d approved entr%s?\n\n"
+                          "Otto will be refused until you tick the box again."
+                          % (n, "y" if n == 1 else "ies")):
+            return
+        try:
+            self.vault.revoke_all_otto()
+        except Exception as exc:
+            messagebox.showerror(APP_NAME, "Could not save: %s" % exc)
+            return
+        self.refresh_list(select_id=self._selected_id)
+        if self._selected_id:
+            self.otto_var.set(False)
+        self.status.set("All of Otto's approvals were revoked.")
+
+    def show_otto_log(self):
+        if self._log_win is not None:
+            try:
+                self._log_win.lift()
+                self._log_win.reload()
+                return
+            except tk.TclError:
+                self._log_win = None
+        self._log_win = OttoLogWindow(self)
 
     # --------------------------------------------------------------- auto-type
     def do_autotype(self, mode="both"):
@@ -649,6 +776,12 @@ class App(tk.Tk):
                             "Old backups still need the OLD password.")
 
     def lock(self, note=None):
+        if self._log_win is not None:
+            try:
+                self._log_win.destroy()
+            except tk.TclError:
+                pass
+            self._log_win = None
         if self._countdown_win:
             self._countdown_win.destroy()
             self._countdown_win = None
