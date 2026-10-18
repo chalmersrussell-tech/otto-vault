@@ -14,7 +14,7 @@ CLIPBOARD_CLEAR_SECS = 20
 SLEEP_GAP_SECS = 90          # a gap this long between timer ticks = PC was asleep
 AUTOTYPE_COUNTDOWN = 3
 INBOX_CHECK_SECS = 15
-REQUEST_CHECK_SECS = 2         # Otto password requests are answered quickly
+REQUEST_CHECK_SECS = 2         # AI password requests are answered quickly
 IDLE_CHOICES = ((5, "5 minutes"), (15, "15 minutes"), (30, "30 minutes"),
                 (60, "60 minutes"), ("never", "Until I lock it or close the app"))
 NO_RECOVERY_WARNING = (
@@ -113,10 +113,10 @@ class OttoLogWindow(tk.Toplevel):
     def __init__(self, app):
         super().__init__(app)
         self.app = app
-        self.title("Otto access log")
+        self.title("AI access log")
         self.geometry("560x380")
         self.transient(app)
-        ttk.Label(self, text="Every time Otto asked for a password (newest first). "
+        ttk.Label(self, text="Every time an AI assistant asked for a password (newest first). "
                              "Passwords are never recorded.", padding=8).pack(anchor="w")
         self.tree = ttk.Treeview(self, columns=("time", "service", "result"),
                                  show="headings")
@@ -217,7 +217,7 @@ class App(tk.Tk):
                 messagebox.showinfo(APP_NAME, msg.strip())
 
     def _process_otto_requests(self):
-        """Answer Otto's password requests (only approved entries are released;
+        """Answer AI assistants' password requests (only approved entries are released;
         everything is logged inside the vault). Runs only while unlocked."""
         if self.vault is None or self.vault.locked:
             return
@@ -230,17 +230,17 @@ class App(tk.Tk):
         msgs = []
         for title, res in results:
             if res == V.R_RELEASED:
-                msgs.append("Otto used the password for '%s'." % title)
+                msgs.append("An AI assistant used the password for '%s'." % title)
             elif res == V.R_DENIED:
-                msgs.append("Otto asked for '%s' - not approved." % title)
+                msgs.append("An AI assistant asked for '%s' - not approved." % title)
             elif res == V.R_NOT_FOUND:
-                msgs.append("Otto asked for '%s' - not found." % title)
+                msgs.append("An AI assistant asked for '%s' - not found." % title)
             elif res == V.R_AMBIGUOUS:
-                msgs.append("Otto asked for '%s' - several entries match, refused." % title)
+                msgs.append("An AI assistant asked for '%s' - several entries match, refused." % title)
             elif res == V.R_RATE:
-                msgs.append("Otto asked for '%s' - too many requests, refused." % title)
+                msgs.append("An AI assistant asked for '%s' - too many requests, refused." % title)
             else:
-                msgs.append("Too many requests from Otto - some were ignored.")
+                msgs.append("Too many requests from an AI assistant - some were ignored.")
         if hasattr(self, "status"):
             self.status.set(" ".join(msgs[-3:]))
         if self._log_win is not None:
@@ -385,7 +385,7 @@ class App(tk.Tk):
         fm = tk.Menu(m, tearoff=0)
         fm.add_command(label="Import from CSV...", command=self.do_import)
         fm.add_command(label="Export encrypted backup...", command=self.do_export)
-        fm.add_command(label="Otto access log...", command=self.show_otto_log)
+        fm.add_command(label="AI access log...", command=self.show_otto_log)
         fm.add_separator()
         fm.add_command(label="Change master password...", command=self.do_change_pw)
         fm.add_command(label="Lock now", command=lambda: self.lock())
@@ -399,7 +399,7 @@ class App(tk.Tk):
             sm.add_radiobutton(label=label, value=str(val), variable=self.idle_choice,
                                command=self.on_idle_choice)
         sm.add_separator()
-        sm.add_command(label="Revoke all of Otto's approvals...", command=self.do_revoke_all)
+        sm.add_command(label="Revoke all AI access approvals...", command=self.do_revoke_all)
         m.add_cascade(label="Settings", menu=sm)
         self.config(menu=m)
 
@@ -420,12 +420,12 @@ class App(tk.Tk):
         ttk.Button(top, text="Clear", command=lambda: self.search_var.set("")).pack(side="left")
         ttk.Button(top, text="+ New entry", command=self.new_entry).pack(side="left", padx=(8, 0))
 
-        cols = ("title", "username", "url", "otto")
+        cols = ("title", "username", "url", "ai")
         self.tree = ttk.Treeview(left, columns=cols, show="headings", selectmode="browse")
-        for c, w in (("title", 200), ("username", 150), ("url", 200), ("otto", 50)):
-            self.tree.heading(c, text=c.capitalize())
-            self.tree.column(c, width=w, anchor="center" if c == "otto" else "w",
-                             stretch=c != "otto")
+        for c, w in (("title", 200), ("username", 150), ("url", 200), ("ai", 50)):
+            self.tree.heading(c, text="AI" if c == "ai" else c.capitalize())
+            self.tree.column(c, width=w, anchor="center" if c == "ai" else "w",
+                             stretch=c != "ai")
         sb = ttk.Scrollbar(left, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y", pady=(8, 0))
@@ -463,7 +463,7 @@ class App(tk.Tk):
         self.notes.grid(row=r, column=0, columnspan=3, sticky="we")
         r += 1
         self.otto_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(right, text="Let Otto use this password (standing approval)",
+        ttk.Checkbutton(right, text="Allow AI access to this password",
                         variable=self.otto_var).grid(
             row=r, column=0, columnspan=3, sticky="w", pady=(8, 0))
         r += 1
@@ -498,7 +498,7 @@ class App(tk.Tk):
             self.tree.selection_set(select_id)
         n = self.vault.approved_count()
         self.status.set("%d entries" % len(self.tree.get_children())
-                        + ("  -  %d approved for Otto" % n if n else ""))
+                        + ("  -  %d with AI access" % n if n else ""))
 
     def clear_form(self):
         self._selected_id = None
@@ -552,7 +552,7 @@ class App(tk.Tk):
             return
         self._selected_id = eid
         self.refresh_list(select_id=eid)
-        self.status.set("Saved. Otto may use this password without asking."
+        self.status.set("Saved. AI assistants may use this password without asking."
                         if d["otto_approved"] else "Saved.")
 
     def delete_entry(self):
@@ -596,15 +596,15 @@ class App(tk.Tk):
         except OSError as exc:
             messagebox.showerror(APP_NAME, "Could not save the setting: %s" % exc)
 
-    # -------------------------------------------------------------- Otto access
+    # -------------------------------------------------------------- AI access
     def do_revoke_all(self):
         n = self.vault.approved_count()
         if not n:
-            messagebox.showinfo(APP_NAME, "No entries are approved for Otto.")
+            messagebox.showinfo(APP_NAME, "No entries have AI access.")
             return
         if not messagebox.askyesno(
-                APP_NAME, "Remove Otto's standing approval from all %d approved entr%s?\n\n"
-                          "Otto will be refused until you tick the box again."
+                APP_NAME, "Remove AI access from all %d approved entr%s?\n\n"
+                          "AI assistants will be refused until you tick the box again."
                           % (n, "y" if n == 1 else "ies")):
             return
         try:
@@ -615,7 +615,7 @@ class App(tk.Tk):
         self.refresh_list(select_id=self._selected_id)
         if self._selected_id:
             self.otto_var.set(False)
-        self.status.set("All of Otto's approvals were revoked.")
+        self.status.set("All AI access approvals were revoked.")
 
     def show_otto_log(self):
         if self._log_win is not None:

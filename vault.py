@@ -34,7 +34,7 @@ from cryptography.hazmat.primitives.serialization import (
     Encoding, NoEncryption, PrivateFormat, PublicFormat)
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 
 FORMAT_NAME = "OttoVault"
 FORMAT_VERSION = 1

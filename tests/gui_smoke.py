@@ -66,7 +66,7 @@ assert any("Imported 1 entry from Otto" in m for m in shown), shown
 assert os.listdir(inbox) == []
 a.search_var.set("fromotto"); a.update(); assert len(a.tree.get_children()) == 1
 
-# ---- Otto standing approval (checkbox, request answering, revoke, log)
+# ---- AI access approval (checkbox, request answering, revoke, log)
 def otto_ask(service):
     req = V.make_request(service)
     d = V.request_dir_for(path); os.makedirs(d, exist_ok=True)
@@ -78,15 +78,36 @@ def otto_ask(service):
     return V.response_open(req["eph_private"], V.read_public_key_file(V.public_key_path_for(path)),
                            open(rp, "rb").read(), req["id"])
 
+# user-facing wording of the AI-access feature
+def widget_texts(w):
+    out = []
+    for c in w.winfo_children():
+        try: out.append(c.cget("text"))
+        except Exception: pass
+        out += widget_texts(c)
+    return out
+assert "Allow AI access to this password" in widget_texts(a)
+assert a.tree.heading("ai", "text") == "AI"
+def menu_labels(m):
+    out = []
+    for i in range(m.index("end") + 1):
+        if m.type(i) == "cascade":
+            out += menu_labels(m.nametowidget(m.entrycget(i, "menu")))
+        elif m.type(i) not in ("separator", "tearoff"):
+            out.append(m.entrycget(i, "label"))
+    return out
+labels = menu_labels(a.nametowidget(a.cget("menu")))
+assert "AI access log..." in labels and "Revoke all AI access approvals..." in labels, labels
+assert not any("Otto" in l for l in labels), labels
 a.search_var.set(""); a.update()
 tid = [i for i in a.tree.get_children() if a.vault.get_entry(i)["title"] == "Test"][0]
 a.tree.selection_set(tid); a.update()
-assert a.otto_var.get() is False and a.tree.set(tid, "otto") == ""
+assert a.otto_var.get() is False and a.tree.set(tid, "ai") == ""
 assert otto_ask("Test")["status"] == "denied"
-assert "Otto asked for 'Test' - not approved" in a.status.get(), a.status.get()
+assert "An AI assistant asked for 'Test' - not approved" in a.status.get(), a.status.get()
 a.otto_var.set(True); a.save_entry(); a.update()
-assert a.vault.get_entry(tid)["otto_approved"] is True and a.tree.set(tid, "otto") == "\u2713"
-assert "approved for Otto" in a.status.get() or "Otto may use" in a.status.get()
+assert a.vault.get_entry(tid)["otto_approved"] is True and a.tree.set(tid, "ai") == "\u2713"
+assert "AI assistants may use this password" in a.status.get()
 body = otto_ask("test")
 assert body["status"] == "released" and body["password"] == "p4ss!", body
 a.tree.selection_set(()); a.update(); a.tree.selection_set(tid); a.update()

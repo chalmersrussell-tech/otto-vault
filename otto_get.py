@@ -1,6 +1,6 @@
 r"""otto_get.py - ask the UNLOCKED OttoVault for a password you were approved for.
 
-The owner must have ticked "Let Otto use this password (standing approval)" on
+The owner must have ticked "Allow AI access to this password" on
 that entry in OttoVault. This tool never opens the vault and never sees the
 master password: it files a request in %APPDATA%\OttoVault\requests\ (service
 name + a one-time public key held only in this process's memory) and waits up
@@ -30,7 +30,7 @@ import vault as V  # noqa: E402
 EXIT = {V.R_RELEASED: 0, V.R_DENIED: 1, V.R_NOT_FOUND: 2, V.R_AMBIGUOUS: 3, V.R_RATE: 5}
 TEXT = {
     V.R_RELEASED: "approved",
-    V.R_DENIED: "denied: the owner has not approved this service for Otto",
+    V.R_DENIED: "denied: the owner has not allowed AI access to this service",
     V.R_NOT_FOUND: "not found",
     V.R_AMBIGUOUS: "ambiguous: more than one entry has that name (add --username)",
     V.R_RATE: "rate limited: too many requests, try again in a minute",

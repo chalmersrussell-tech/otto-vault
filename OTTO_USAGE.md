@@ -43,17 +43,17 @@ and no `.bad` files) and the entry appears in the list.
 
 ---
 
-# Standing per-service approval (`otto_get.py`) - new in 1.2
+# AI access to approved passwords (`otto_get.py`) - new in 1.2
 
-Lets an automation helper (Otto) retrieve the password of **specific services
+Lets an AI assistant (or other automation helper) retrieve the password of **specific services
 you approved**, without asking each time, **only while OttoVault is unlocked**.
 
 ## Turning it on (owner, in the app only)
 1. Unlock OttoVault, click an entry.
-2. Tick **"Let Otto use this password (standing approval)"** and press **Save**.
-   The list shows a tick in the **Otto** column.
+2. Tick **"Allow AI access to this password"** and press **Save**.
+   The list shows a tick in the **AI** column.
 3. Untick + Save to revoke that entry at once, or use
-   **Settings > Revoke all of Otto's approvals...**.
+   **Settings > Revoke all AI access approvals...**.
 
 There is no command, file or API that can set the approval: only the app's
 form can. New entries (including those added through the inbox or a CSV import) are
@@ -97,7 +97,7 @@ not running, 5 rate limited, 6 error. With `--print`, only the password goes to
 standard output; status text goes to standard error.
 
 ## Audit log
-**File > Otto access log...** shows time, service and result (*released*,
+**File > AI access log...** shows time, service and result (*released*,
 *denied*, *not found*, *ambiguous*, *rate limited*, plus *approved*/*revoked*
 changes) for the last 500 events. It is stored inside the encrypted vault and
 never contains a password.
@@ -105,7 +105,7 @@ never contains a password.
 ## Security notes - please read
 * **This is a deliberate tradeoff.** While the vault is unlocked, any program
   running as the same Windows user could also file a request for an approved
-  entry (and the vault cannot tell Otto from such a program). Approve only
+  entry (and the vault cannot tell your AI assistant from such a program). Approve only
   services you actually want automated, and lock the vault when you are away
   (File > Lock now, or a short "stay unlocked" time in Settings).
 * The master password is **never stored** anywhere. Approvals and the log live
