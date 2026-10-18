@@ -19,6 +19,17 @@
 - **Saves automatically.** There is no separate "save the vault" step and no File > Save: pressing Save on an entry (or adding, deleting or importing entries, or an AI-added login arriving) writes the encrypted vault to disk right away (atomic write, with a `.bak` backup copy of the previous version).
 - **Bring your passwords with you:** import from **KeePass 1 (`.kdb`)** databases directly, **KeePass 2.x XML**, OttoVault XML and **CSV**.
 
+## Back up / export your vault
+Your passwords live in one encrypted file: `%APPDATA%\OttoVault\vault.dat` (usually `C:\Users\<you>\AppData\Roaming\OttoVault\vault.dat`). It is always encrypted; copying that file is a valid backup, but the easiest way inside the app is:
+
+1. Unlock OttoVault.
+2. File > **Export encrypted backup...**
+3. Choose a safe place (a USB stick or another drive - not a public or shared folder). The copy is still encrypted and opens with the **same master password** you had when you made it.
+
+To restore: on the unlock screen, click **Restore from a backup file...** and enter that backup's master password.
+
+OttoVault also keeps the previous version next to the vault as `vault.dat.bak`, replaced on each save. That is a safety net against a bad write, not a substitute for a copy stored somewhere else. Do **not** confuse a backup with File > "Export to XML (not encrypted)...", which writes your passwords in plain text and is only for moving entries between apps.
+
 ## Principles
 - **Your device, your data.** The vault is one encrypted file stored locally. Sync is optional and up to you.
 - **One master password** unlocks it. It cannot be recovered if forgotten, and the app says so clearly.
