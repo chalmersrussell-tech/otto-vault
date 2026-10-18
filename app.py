@@ -468,6 +468,7 @@ class App(tk.Tk):
         fm = tk.Menu(m, tearoff=0)
         fm.add_command(label="Import from CSV...", command=self.do_import)
         fm.add_command(label="Import from XML...", command=self.do_import_xml)
+        fm.add_command(label="Import from KeePass 1 (.kdb)...", command=self.do_import_kdb)
         fm.add_command(label="Export to XML (not encrypted)...", command=self.do_export_xml)
         fm.add_command(label="Export encrypted backup...", command=self.do_export)
         fm.add_command(label="AI access log...", command=self.show_otto_log)
@@ -885,6 +886,86 @@ class App(tk.Tk):
             "The XML file you imported contains your passwords in PLAIN TEXT. "
             "Delete it now (and empty the Recycle Bin)."
             % (added, r["format"], skipped, r["duplicates"], extra))
+
+    # KeePass 1 (.kdb) import: wrong KeePass passwords never touch OttoVault's own
+    # lockout (a different password); only a small in-memory pause after repeats.
+    _kdb_wrong = 0
+    _kdb_block_until = 0.0
+
+    def do_import_kdb(self):
+        import kdb as K
+        wait = int(self._kdb_block_until - time.time())
+        if wait > 0:
+            messagebox.showinfo(APP_NAME, "Too many wrong KeePass passwords in a row. "
+                                          "Please wait %d seconds and try again. (This does not "
+                                          "affect your OttoVault master password.)" % wait)
+            return
+        p = filedialog.askopenfilename(
+            title="Choose a KeePass 1 database (.kdb)",
+            filetypes=[("KeePass 1 databases", "*.kdb"), ("All files", "*.*")])
+        if not p:
+            return
+        keyfile = None
+        while True:
+            d = PasswordPrompt(
+                self, "KeePass database password",
+                ["KeePass password:"],
+                "Enter the password of the KeePass database you are importing - NOT your "
+                "OttoVault master password. It is used only in memory to open that file and "
+                "is never saved or logged." + (
+                    "\n\nKey file selected: %s" % os.path.basename(keyfile) if keyfile else ""))
+            if not d.result:
+                return
+            if not d.result[0] and not keyfile:
+                messagebox.showinfo(APP_NAME, "Please enter the KeePass database password.")
+                continue
+            self.status.set("Opening the KeePass database (can take a few seconds)...")
+            self.config(cursor="watch")
+            self.update_idletasks()
+            try:
+                added, skipped = self.vault.import_kdb(p, d.result[0], keyfile)
+            except K.KdbWrongPassword:
+                self.config(cursor="")
+                self.status.set("KeePass import: wrong password.")
+                self._kdb_wrong += 1
+                if self._kdb_wrong >= 3:
+                    self._kdb_block_until = time.time() + 30 * (self._kdb_wrong - 2)
+                messagebox.showerror(
+                    APP_NAME, "That password did not open the KeePass database (or it also needs "
+                              "a key file). Nothing was imported.\n\nThis has no effect on "
+                              "OttoVault's own lock.")
+                if time.time() < self._kdb_block_until:
+                    return
+                if messagebox.askyesno(APP_NAME, "Does this database also use a key file?\n\n"
+                                                 "Yes = choose the key file and try again.\n"
+                                                 "No = try the password again."):
+                    kf = filedialog.askopenfilename(title="Choose the KeePass key file")
+                    if kf:
+                        keyfile = kf
+                continue
+            except V.VaultError as exc:
+                self.config(cursor="")
+                self.status.set("KeePass import failed.")
+                messagebox.showerror(APP_NAME, str(exc))
+                return
+            self.config(cursor="")
+            self._kdb_wrong = 0
+            self.refresh_list()
+            r = self.vault.last_kdb_report
+            extra = ""
+            if r["invalid"]:
+                extra += "\n%d entries were skipped because a field was too long or had forbidden characters." % r["invalid"]
+            if r["backup_group"]:
+                extra += "\n%d entries in KeePass's 'Backup' group were not imported (old copies)." % r["backup_group"]
+            self.status.set("Imported %d entries from KeePass 1." % added)
+            messagebox.showinfo(
+                APP_NAME,
+                "Imported %d entries from the KeePass 1 database (%d found, %d duplicates skipped).%s\n\n"
+                "Imported entries have NO AI access - tick it yourself where wanted. "
+                "Group names and attachments are not imported.\n\n"
+                "Keep your .kdb file as a backup until you have checked that everything "
+                "you need arrived." % (added, r["found"], r["duplicates"], extra))
+            return
 
     def do_export_xml(self):
         if self.lockout.remaining() > 0:

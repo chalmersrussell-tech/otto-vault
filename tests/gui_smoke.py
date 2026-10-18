@@ -215,6 +215,58 @@ A.PasswordPrompt = A.PromptReal
 os.remove(xml_out)
 print("xml GUI OK")
 
+# ---- KeePass 1 (.kdb) import (menu, password prompt, wrong password never touches the lockout)
+sys.path.insert(0, os.path.dirname(__file__))
+from kdb_helper import make_kdb
+labels = menu_labels(a.nametowidget(a.cget("menu")))
+assert "Import from KeePass 1 (.kdb)..." in labels, labels
+kdb_path = os.path.join(tmp, "synthetic.kdb")
+kdb_key = os.path.join(tmp, "synthetic.key")
+open(kdb_path, "wb").write(make_kdb("kdb-throwaway-pw", [(1, "General")], [
+    {"gid": 1, "title": "FromKdb", "username": "ku", "password": "kdb-entry-pw", "url": "https://k.example", "notes": "n"},
+    {"gid": 1, "title": "FromKdb Two", "password": "k2"}]))
+A.filedialog.askopenfilename = lambda **k: kdb_path
+asked.clear()
+A.messagebox.askyesno = lambda *x, **k: False          # "key file?" -> No
+A.PasswordPrompt = FakePrompt
+n_before = len(a.vault.list_entries())
+fails_before = a.lockout.failures
+shown.clear()
+for i in range(2):                                       # two wrong KeePass passwords
+    FakePrompt.answer = ["wrong-kdb-pw"]
+    calls = [0]
+    orig = A.PasswordPrompt
+    class OnceThenCancel(FakePrompt):
+        def __init__(self, *args, **kw):
+            calls[0] += 1
+            self.result = list(FakePrompt.answer) if calls[0] == 1 else None
+    A.PasswordPrompt = OnceThenCancel
+    a.do_import_kdb(); a.update()
+    A.PasswordPrompt = orig
+assert any("did not open the KeePass database" in m and "no effect on OttoVault's own lock" in m for m in shown), shown
+assert len(a.vault.list_entries()) == n_before
+assert a.lockout.failures == fails_before and a.lockout.remaining() == 0, "KeePass password counted against OttoVault lockout!"
+FakePrompt.answer = ["kdb-throwaway-pw"]
+shown.clear(); a.do_import_kdb(); a.update()
+assert any("Imported 2 entries from the KeePass 1 database" in m and "NO AI access" in m and "backup" in m for m in shown), shown
+a.search_var.set("fromkdb"); a.update(); assert len(a.tree.get_children()) == 2
+a.search_var.set("")
+assert a.vault.approved_count() == 0 and len(a.vault.list_entries()) == n_before + 2
+shown.clear(); a.do_import_kdb(); a.update()             # again: duplicates
+assert any("Imported 0 entries" in m for m in shown), shown
+# three wrong passwords in a row pause further attempts (in memory, separate from the master lockout)
+a._kdb_wrong = 0
+FakePrompt.answer = ["bad1"]
+for i in range(3):
+    calls = [0]; A.PasswordPrompt = OnceThenCancel
+    a.do_import_kdb(); a.update()
+shown.clear(); a.do_import_kdb(); a.update()
+assert any("Too many wrong KeePass passwords" in m for m in shown), shown
+assert a.lockout.failures == fails_before
+A.PasswordPrompt = A.PromptReal
+os.remove(kdb_path)
+print("kdb GUI OK")
+
 # auto-type flow with mocked SendInput + short countdown
 A.AUTOTYPE_COUNTDOWN = 1
 a.search_var.set("")

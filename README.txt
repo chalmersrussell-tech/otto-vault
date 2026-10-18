@@ -1,4 +1,4 @@
-OTTOVAULT 1.3.1 - a free password manager that lives only on your PC
+OTTOVAULT 1.3.2 - a free password manager that lives only on your PC
 ================================================================
 No cloud. No internet use. No account. No subscription. No tracking.
 Your passwords are stored in one encrypted file on this computer.
@@ -157,7 +157,7 @@ MOVING YOUR KEEPASSX PASSWORDS IN
    passwords as plain readable text!
 5. Keep your KeePassX vault until you are sure everything came across.
 
-XML IMPORT / EXPORT - NEW in 1.3.1
+XML IMPORT / EXPORT - NEW in 1.3.2
 ----------------------------------
 File > "Import from XML..." reads an OttoVault XML file or a KeePass 2.x XML
 export (KeePass: File > Export > "KeePass XML (2.x)"). Title, username,
@@ -171,6 +171,23 @@ again, and you should delete the file after use (and empty the Recycle Bin).
 For a normal backup use File > Export encrypted backup... instead.
 XML is only for moving data between programs; your vault itself stays
 encrypted. Files over 10 MiB, or containing DOCTYPE/entity tricks, are refused.
+
+KEEPASS 1 (.kdb) IMPORT - NEW in 1.3.2
+--------------------------------------
+File > "Import from KeePass 1 (.kdb)..." opens a KeePassX / KeePass 1.x
+database directly. Pick the .kdb file, then type the KeePass database's own
+password in the box (NOT your OttoVault master password). It is used only in
+memory to open that file and is never saved or logged. A wrong KeePass
+password just shows an error; it does not count toward OttoVault's lockout
+(after 3 wrong tries in a row the import pauses for a short while).
+Title, username, password, URL and notes come across. Duplicates are skipped,
+odd entries are skipped and counted, and imported entries never get AI
+access. Group names, attachments and KeePass's "Backup" group are not
+imported. Key files are supported (the program asks after a wrong password).
+KEEP YOUR .kdb FILE as a backup until you have checked the imported entries.
+Not supported: ARCFOUR databases and .kdbx (KeePass 2: use its XML export).
+Twofish databases are supported but were tested only with test vectors and
+synthetic files, not with a file written by real KeePass.
 
 BACKUPS (please do this)
 ------------------------

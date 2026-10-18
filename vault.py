@@ -43,7 +43,7 @@ try:   # Argon2id needs the "cryptography" package 44.0 or newer
 except ImportError:   # pragma: no cover - depends on the installed version
     Argon2id = None
 
-__version__ = "1.3.1"
+__version__ = "1.3.2"
 
 FORMAT_NAME = "OttoVault"
 FORMAT_VERSION = 1
@@ -839,6 +839,7 @@ class Vault:
         self.integrity_warnings = []       # shown loudly by the GUI after unlock
         self.kdf_upgraded = False          # True once if open() re-wrapped the key
         self.last_xml_report = None        # details of the latest import_xml()
+        self.last_kdb_report = None        # details of the latest import_kdb()
         self._migrate()
         self._verify_log()
 
@@ -1513,6 +1514,45 @@ class Vault:
         self.last_xml_report = {"format": fmt, "added": added, "duplicates": dup,
                                 "invalid": invalid, "unsupported": unsupported}
         return added, dup + invalid + unsupported
+
+    def import_kdb(self, kdb_path, kdb_password, keyfile=None):
+        """Import entries from a KeePass 1.x (.kdb) database. kdb_password is the
+        KeePass database's own password (NOT this vault's master password; it is
+        used only to decrypt in memory and is never stored). Same validation and
+        duplicate policy as CSV/XML; never grants AI access. A wrong password raises
+        kdb.KdbWrongPassword and changes nothing. Returns (added, skipped); details
+        in self.last_kdb_report."""
+        import kdb
+        try:
+            rows, info = kdb.read_kdb(kdb_path, kdb_password, keyfile)
+        except kdb.KdbWrongPassword:
+            raise
+        except kdb.KdbError as exc:
+            raise VaultError(str(exc)) from exc
+        for r in rows:
+            if not r["title"].strip():
+                r["title"] = r["url"].strip() or r["username"].strip() or "(untitled)"
+        have = {tuple(e[f] for f in FIELDS) for e in self._data["entries"]}
+        added = invalid = dup = 0
+        for r in rows:
+            try:
+                c = clean_entry_fields(**{f: r[f] for f in FIELDS})
+            except VaultError:
+                invalid += 1
+                continue
+            key = tuple(c[f] for f in FIELDS)
+            if key in have:
+                dup += 1
+                continue
+            have.add(key)
+            self._data["entries"].append(self._new_entry(**c))
+            added += 1
+        if added:
+            self.save()
+        self.last_kdb_report = {"cipher": info["cipher"], "found": len(rows), "added": added,
+                                "duplicates": dup, "invalid": invalid,
+                                "backup_group": info["backup"], "meta": info["meta"]}
+        return added, dup + invalid + info["backup"]
 
     # --- export / restore (encrypted with the current master password)
     def export_backup(self, dest_path):

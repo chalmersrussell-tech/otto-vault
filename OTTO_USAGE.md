@@ -112,8 +112,8 @@ produces a warning when you unlock (a "log integrity warning" event stays in
 the log). That detects silent edits; it cannot stop you deleting the vault.
 
 ## Security notes - please read
-* Entries brought in through the inbox, CSV import or XML import (File > Import
-  from XML...) are never approved for AI access, whatever the file says. An XML
+* Entries brought in through the inbox, CSV import, XML import or KeePass 1
+  (.kdb) import are never approved for AI access, whatever the file says. An XML
   *export* lists `ai_access` only as information.
 * **This is a deliberate tradeoff.** While the vault is unlocked, any program
   running as the same Windows user could also file a request for an approved

@@ -20,3 +20,4 @@ dist/
 *.pre-upgrade.bak
 lockout.json
 audit_anchor.json
+*.kdb
