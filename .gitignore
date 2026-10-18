@@ -1,0 +1,16 @@
+vault.dat
+vault.dat.bak
+*.dat
+*.bak
+*.csv
+*.vault
+*.ottovault
+*.ottoentry
+*.ottoentry.bad
+__pycache__/
+*.pyc
+.pytest_cache/
+*.tmp
+venv/
+OTTO_USAGE.local.md
+*.local.md
