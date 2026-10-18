@@ -1,4 +1,4 @@
-OTTOVAULT 1.3.0 - a free password manager that lives only on your PC
+OTTOVAULT 1.3.1 - a free password manager that lives only on your PC
 ================================================================
 No cloud. No internet use. No account. No subscription. No tracking.
 Your passwords are stored in one encrypted file on this computer.
@@ -157,6 +157,21 @@ MOVING YOUR KEEPASSX PASSWORDS IN
    passwords as plain readable text!
 5. Keep your KeePassX vault until you are sure everything came across.
 
+XML IMPORT / EXPORT - NEW in 1.3.1
+----------------------------------
+File > "Import from XML..." reads an OttoVault XML file or a KeePass 2.x XML
+export (KeePass: File > Export > "KeePass XML (2.x)"). Title, username,
+password, URL and notes come across; KeePass groups, history, attachments and
+custom fields do not, and the Recycle Bin group is skipped. Duplicates are
+skipped, too-long or odd-character entries are skipped and counted, and
+imported entries never get AI access (you tick that yourself).
+File > "Export to XML (not encrypted)..." writes ALL your entries, with
+passwords, as READABLE TEXT. It warns you, asks for your master password
+again, and you should delete the file after use (and empty the Recycle Bin).
+For a normal backup use File > Export encrypted backup... instead.
+XML is only for moving data between programs; your vault itself stays
+encrypted. Files over 10 MiB, or containing DOCTYPE/entity tricks, are refused.
+
 BACKUPS (please do this)
 ------------------------
 * File > Export encrypted backup... saves an encrypted copy wherever you
@@ -221,6 +236,6 @@ HOW TO TEST IT (5 minutes, uses a fake entry)
 FOR DEVELOPERS: tests
 ---------------------
   py -m pip install pytest
-  py -m pytest tests          (151 tests)
+  py -m pytest tests          (174 tests)
   otto_get.py asks the unlocked app for an approved password (status only unless --print)
   otto_add.py queues an inbox entry:  py otto_add.py --service "Name" --generate-username --generate-password

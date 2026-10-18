@@ -26,6 +26,7 @@ import tempfile
 import time
 import unicodedata
 import uuid
+import xml.etree.ElementTree as ET
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes
@@ -42,7 +43,7 @@ try:   # Argon2id needs the "cryptography" package 44.0 or newer
 except ImportError:   # pragma: no cover - depends on the installed version
     Argon2id = None
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 
 FORMAT_NAME = "OttoVault"
 FORMAT_VERSION = 1
@@ -682,6 +683,133 @@ def parse_csv(path):
     return out
 
 
+# -------------------------------------------------------------------- XML
+# XML is an INTERCHANGE format only (like CSV): the live vault stays the
+# encrypted custom file. An exported XML file is plain text with every password
+# in it. Parsing uses the standard library's ElementTree after refusing any
+# document that declares a DOCTYPE or entities (no entity expansion, no
+# external entities, so no "billion laughs" and no XXE), with a size cap.
+#
+# OttoVault schema (version 1):
+#   <ottovault version="1">
+#     <entry ai_access="true" ai_access_until="2026-11-17">   <!-- optional, informational -->
+#       <title/> <username/> <password/> <url/> <notes/>
+#     </entry>
+#   </ottovault>
+# ai_access / ai_access_until are written for information only; import ignores
+# them - importing NEVER grants AI access.
+#
+# Also read: KeePass 2.x "XML" export (KeePassFile/Root/Group/Entry with
+# <String><Key>Title|UserName|Password|URL|Notes</Key><Value>...</Value></String>).
+# Groups (names/hierarchy), history, attachments, custom fields, icons, tags and
+# expiry are ignored; the "Recycle Bin" group is skipped; entries whose password
+# value is marked Protected="True" (KeePass's internal encrypted form, not what
+# its XML export writes) are skipped instead of importing ciphertext.
+XML_MAX_BYTES = 10 * 1024 * 1024
+XML_MAX_ENTRIES = 50000
+XML_ROOT = "ottovault"
+XML_VERSION = "1"
+_XML_BAD_CHARS = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
+
+
+def _xml_text(s):
+    return s if isinstance(s, str) else ""
+
+
+def read_xml_root(path):
+    """Read + safely parse an XML file. Raises VaultError (never anything else)."""
+    try:
+        size = os.path.getsize(path)
+        if size > XML_MAX_BYTES:
+            raise VaultError("This XML file is too large (limit %d MiB)." % (XML_MAX_BYTES >> 20))
+        with open(path, "rb") as f:
+            raw = f.read(XML_MAX_BYTES + 1)
+    except OSError as exc:
+        raise VaultError("Could not read file: %s" % exc.strerror) from exc
+    if len(raw) > XML_MAX_BYTES:
+        raise VaultError("This XML file is too large (limit %d MiB)." % (XML_MAX_BYTES >> 20))
+    try:
+        if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+            text = raw.decode("utf-16")
+        else:
+            text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise VaultError("The XML file must be saved as UTF-8 (or UTF-16).") from exc
+    low = text.lower()
+    if "<!doctype" in low or "<!entity" in low:
+        raise VaultError("Refused: the XML file contains a DOCTYPE/entity declaration "
+                         "(not used by OttoVault or KeePass exports, and unsafe).")
+    try:
+        return ET.fromstring(text)
+    except ET.ParseError as exc:
+        raise VaultError("This is not a valid XML file (%s)." % exc) from exc
+    except (ValueError, RecursionError) as exc:
+        raise VaultError("This is not a valid XML file.") from exc
+
+
+def _ottovault_xml_entries(root):
+    ver = root.get("version")
+    if ver is not None and ver != XML_VERSION:
+        raise VaultError("Unsupported OttoVault XML version (%r)." % ver)
+    out = []
+    for el in root.findall("entry"):
+        out.append({f: _xml_text(el.findtext(f, default="")) for f in FIELDS})
+    return out
+
+
+def _keepass_entries(root):
+    """(entries, unsupported_count) from a KeePass 2.x XML export."""
+    out, unsupported = [], 0
+
+    def walk(group):
+        nonlocal unsupported
+        name = (group.findtext("Name") or "").strip()
+        if name == "Recycle Bin":
+            return
+        for el in group.findall("Entry"):          # direct children only: History is skipped
+            vals, protected = {}, False
+            for st in el.findall("String"):
+                key = st.findtext("Key")
+                v = st.find("Value")
+                if key in ("Title", "UserName", "Password", "URL", "Notes") and v is not None:
+                    if key == "Password" and (v.get("Protected") or "").lower() == "true":
+                        protected = True
+                    vals[key] = _xml_text(v.text)
+            if protected:
+                unsupported += 1
+                continue
+            out.append({"title": vals.get("Title", ""), "username": vals.get("UserName", ""),
+                        "password": vals.get("Password", ""), "url": vals.get("URL", ""),
+                        "notes": vals.get("Notes", "")})
+        for sub in group.findall("Group"):
+            walk(sub)
+
+    top = root.find("Root")
+    if top is None:
+        raise VaultError("This KeePass XML file has no <Root> section.")
+    for g in top.findall("Group"):
+        walk(g)
+    return out, unsupported
+
+
+def parse_xml_entries(path):
+    """Return (rows, format_name, unsupported_count) without touching any vault."""
+    root = read_xml_root(path)
+    if root.tag == XML_ROOT:
+        rows, fmt, uns = _ottovault_xml_entries(root), "OttoVault XML", 0
+    elif root.tag == "KeePassFile":
+        (rows, uns), fmt = _keepass_entries(root), "KeePass 2.x XML"
+    else:
+        raise VaultError("Not an OttoVault or KeePass 2.x XML file (root element <%s>)."
+                         % _clean_text(root.tag, 40))
+    if len(rows) > XML_MAX_ENTRIES:
+        raise VaultError("Too many entries in one XML file (limit %d)." % XML_MAX_ENTRIES)
+    for r in rows:
+        if not r["title"].strip():
+            r["title"] = r["url"].strip() or r["username"].strip() or "(untitled)"
+    return rows, fmt, uns
+
+
 # ------------------------------------------------------------------ Vault
 ANCHOR_FILENAME = "audit_anchor.json"
 _AUDIT_INFO = b"OttoVault audit chain v1"
@@ -710,6 +838,7 @@ class Vault:
         self._dirty = False                # migration/integrity changes not yet saved
         self.integrity_warnings = []       # shown loudly by the GUI after unlock
         self.kdf_upgraded = False          # True once if open() re-wrapped the key
+        self.last_xml_report = None        # details of the latest import_xml()
         self._migrate()
         self._verify_log()
 
@@ -1318,6 +1447,72 @@ class Vault:
         if added:
             self.save()
         return added, skipped
+
+    # --- XML import / export (interchange only; see the XML section above)
+    def verify_master_password(self, password):
+        """True if password opens this vault (used to re-confirm risky actions)."""
+        try:
+            return secrets.compare_digest(_derive_with(self._kdf, password), self._key)
+        except VaultError:
+            return False
+
+    def export_xml(self, dest_path, include_ai_info=True):
+        """Write ALL entries as UNENCRYPTED XML (plain-text passwords!).
+        Returns (written, skipped); skipped = entries holding characters XML
+        cannot carry (only possible for entries older than the input rules)."""
+        root = ET.Element(XML_ROOT, {"version": XML_VERSION})
+        root.append(ET.Comment(" UNENCRYPTED export from OttoVault: contains passwords in "
+                               "plain text. Delete it after use. "))
+        written = skipped = 0
+        for e in self.list_entries():
+            if any(_XML_BAD_CHARS.search(str(e.get(f, ""))) for f in FIELDS):
+                skipped += 1
+                continue
+            attrs = {}
+            if include_ai_info and e.get("otto_approved") is True:
+                attrs["ai_access"] = "true"
+                if e.get("otto_expires"):
+                    attrs["ai_access_until"] = time.strftime(
+                        "%Y-%m-%d", time.localtime(e["otto_expires"]))
+            el = ET.SubElement(root, "entry", attrs)
+            for f in FIELDS:
+                ET.SubElement(el, f).text = e.get(f, "")
+            written += 1
+        ET.indent(root, space="  ")
+        data = ('<?xml version="1.0" encoding="UTF-8"?>\n'
+                + ET.tostring(root, encoding="unicode") + "\n").encode("utf-8")
+        _atomic_write(dest_path, data, keep_backup=False)
+        try:
+            os.chmod(dest_path, 0o600)       # best effort (no effect on Windows)
+        except OSError:
+            pass
+        return written, skipped
+
+    def import_xml(self, xml_path):
+        """Import entries from an OttoVault or KeePass 2.x XML file with the same
+        validation and duplicate policy as CSV. Never grants AI access. Returns
+        (added, skipped); details in self.last_xml_report."""
+        rows, fmt, unsupported = parse_xml_entries(xml_path)
+        have = {tuple(e[f] for f in FIELDS) for e in self._data["entries"]}
+        added = invalid = dup = 0
+        for r in rows:
+            try:
+                c = clean_entry_fields(**{f: r[f] for f in FIELDS})
+            except VaultError:
+                invalid += 1
+                continue
+            key = tuple(c[f] for f in FIELDS)
+            if key in have:
+                dup += 1
+                continue
+            have.add(key)
+            self._data["entries"].append(self._new_entry(**c))
+            added += 1
+        if added:
+            self.save()
+        self.last_xml_report = {"format": fmt, "added": added, "duplicates": dup,
+                                "invalid": invalid, "unsupported": unsupported}
+        return added, dup + invalid + unsupported
 
     # --- export / restore (encrypted with the current master password)
     def export_backup(self, dest_path):

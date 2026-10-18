@@ -18,16 +18,17 @@ Good password managers are usually subscriptions, and many people skip them and 
 - A new, unaudited app should not be anyone's only copy of their passwords. Keep an existing manager until you trust it, and keep backups.
 - Established free options already exist (for example KeePass-family apps and Bitwarden's free tier). This project is a learning build and a simple option, not a claim to be safer than them.
 
-## Status (version 1.3.0)
+## Status (version 1.3.1)
 A working Windows version is included here: Python and tkinter, local only, no network code.
 
 - Encrypted vault (Argon2id or Scrypt key derivation + AES-256-GCM, fresh nonce on every save, atomic saves with a `.bak`), master password, add/edit/delete/search, copy with auto-clearing clipboard, password generator, encrypted backup/restore, CSV import.
 - **Stay unlocked** (1Password-style): enter the master password once; choose 5/15/30/60 minutes idle or "until I lock it" in the Settings menu (default 15). Locks on sleep. Only that preference is saved (`settings.json`); the master password is never stored and the key lives only in memory. Changing the master password still asks for the current one.
 - **Auto-type login**: types username, Tab, password, Enter into the window you click (Windows `SendInput`, Unicode-safe, clipboard not used). Variants: password only, username only.
+- **XML import/export** (interchange only, like CSV; the live vault stays the encrypted file): File > "Export to XML (not encrypted)..." and "Import from XML...". Reads OttoVault XML and a subset of KeePass 2.x XML exports. See the XML notes below.
 - **Otto inbox**: the vault holds an X25519 key pair; the public key is written to `inbox_public.key`. `otto_add.py` can encrypt a new entry to it and drop it in the `inbox` folder without ever knowing the master password; the app imports it on the next unlock.
 - **Per-service AI access (optional, off by default)**: tick "Allow AI access to this password" on an entry and an AI assistant using `otto_get.py` can fetch that one password from the *running, unlocked* app through an encrypted request/response mailbox, without asking again. Locked vault = no answer. The master password is never stored; approvals and an audit log live inside the encrypted vault; every release is logged; you can untick one entry or revoke all. See the security tradeoff in `OTTO_USAGE.md`.
 
-Tests: 151 pytest unit tests (`py -m pytest tests`) plus a headless GUI smoke test (`tests/gui_smoke.py`, run under xvfb on Linux). Real auto-typing into a Windows application and the tkinter GUI on Windows have not been automatically tested, and the app has not been independently audited.
+Tests: 174 pytest unit tests (`py -m pytest tests`) plus a headless GUI smoke test (`tests/gui_smoke.py`, run under xvfb on Linux). Real auto-typing into a Windows application and the tkinter GUI on Windows have not been automatically tested, and the app has not been independently audited.
 
 To run it on Windows, read `README.txt`; for the helper scripts (inbox and approved retrieval) see `OTTO_USAGE.md` (install Python once, then double-click `Run OttoVault.bat`).
 
@@ -51,6 +52,25 @@ To run it on Windows, read `README.txt`; for the helper scripts (inbox and appro
 **Access log integrity.** True immutability is impossible on a PC you control (you can always delete `vault.dat`). Instead the log is *tamper-evident*: each log entry carries an HMAC-SHA256 chained to the previous entry, keyed from the vault key; a tiny `audit_anchor.json` next to the vault (also MAC'd, no secrets) remembers the newest entry. On every unlock the chain and the anchor are checked; an edited, deleted, re-ordered or forged entry, or a vault restored from an older copy, produces a loud warning dialog and a permanent "log integrity warning" event. Limits: this detects silent edits by anything that does not know the master password (or that edits without recomputing the chain); someone who knows your master password *and* rewrites the whole vault with the code can still forge a consistent log; deleting both `vault.dat` and its anchor destroys the evidence; restoring an old backup legitimately triggers the warning once.
 
 **Launcher / `.exe`.** `Run OttoVault.bat` starts the app with your Python. `build_exe.ps1` builds a real `OttoVault.exe` (PyInstaller, no console window, per-user install). Neither is a security boundary: both run the same open Python code, an unsigned exe may trigger SmartScreen/antivirus warnings or be **blocked outright** by Windows application-control policies (Smart App Control / WDAC / AppLocker - it was blocked on the author's own PC, so the `.bat` remains the supported way to start the app; do not weaken your Windows policy for this), and obfuscating a launcher would only be theater. The vault is protected by encryption and your master password, not by how the program is started. The build never includes your vault.
+
+**XML import / export.** XML is a plain-text interchange format, parallel to CSV; it never replaces `vault.dat`. *Export* (File > "Export to XML (not encrypted)...") first shows a warning, then asks you to re-enter your master password (a wrong password counts toward the unlock lockout), then writes every entry **unencrypted**, including passwords - delete the file after use; it is created owner-only where the OS supports that, but cloud-sync or backup software may still copy it. *Import* (File > "Import from XML...") applies the same length/character rules and the same duplicate rule as CSV (exact duplicates are skipped), and **never grants AI access** (the optional `ai_access` / `ai_access_until` attributes in an export are informational and ignored on import). Parsing is hardened: files over 10 MiB or with more than 50,000 entries are refused, and any file containing a `DOCTYPE` or entity declaration is refused before parsing (so no "billion laughs" entity expansion and no external-entity/XXE file reads; only the standard-library ElementTree is used, no new dependencies). Malformed files give a clear error and change nothing. Files must be UTF-8 or UTF-16.
+
+Schema (OttoVault XML, version 1):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<ottovault version="1">
+  <entry ai_access="true" ai_access_until="2026-11-17">   <!-- attributes optional, informational -->
+    <title>...</title>
+    <username>...</username>
+    <password>...</password>
+    <url>...</url>
+    <notes>...</notes>
+  </entry>
+</ottovault>
+```
+
+KeePass 2.x XML (File > Export > "KeePass XML (2.x)"): **works** - Title, UserName, Password, URL and Notes of every entry in every group. **Not imported**: group names/hierarchy, entry history, attachments, custom fields, tags, icons, expiry; entries in the "Recycle Bin" group are skipped; entries whose password is stored in KeePass's protected form (`Protected="True"`, not what the XML export normally writes) are skipped and counted rather than importing ciphertext. KeePass 1.x XML, `.kdbx` and other formats are not supported (export CSV or KeePass 2.x XML from those programs). Tested only with hand-made sample files, not with real KeePass exports of every version.
 
 **Not (yet) covered.** No independent security audit. Python cannot wipe secrets from memory. Windows clipboard history may keep copied passwords. Keystroke loggers see what you type. Backups made with File > Export keep the approvals and log of that moment.
 

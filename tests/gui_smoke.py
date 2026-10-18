@@ -177,6 +177,44 @@ assert "WARNING" in a.status.get()
 assert a.vault.otto_log()[0]["result"] == "log integrity warning"
 print("hardening GUI OK")
 
+# ---- XML export/import (menu, warnings, master-password re-check)
+labels = menu_labels(a.nametowidget(a.cget("menu")))
+assert "Import from XML..." in labels and "Export to XML (not encrypted)..." in labels, labels
+xml_out = os.path.join(tmp, "export.xml")
+asked = []
+A.messagebox.askyesno = lambda *x, **k: asked.append(x[1]) or True
+A.filedialog.asksaveasfilename = lambda **k: xml_out
+A.filedialog.askopenfilename = lambda **k: xml_out
+warned = []
+A.messagebox.showwarning = lambda *x, **k: warned.append(x[1])
+class FakePrompt:
+    answer = ["wrong-wrong-xml"]
+    def __init__(self, *args, **kw): self.result = list(FakePrompt.answer)
+A.PromptReal = A.PasswordPrompt; A.PasswordPrompt = FakePrompt
+shown.clear()
+a.do_export_xml(); a.update()                           # wrong master password: nothing written
+assert not os.path.exists(xml_out) and a.lockout.failures == 1
+assert any("NOT encrypted" in m for m in asked), asked
+FakePrompt.answer = ["throwaway-test-pw"]
+a.do_export_xml(); a.update()
+assert os.path.exists(xml_out) and a.lockout.failures == 0
+assert any("NOT encrypted" in m and "plain text" in m for m in warned), warned
+assert b"<ottovault" in open(xml_out, "rb").read() and b"p4ss!" in open(xml_out, "rb").read()
+n_before = len(a.vault.list_entries())
+a.do_import_xml(); a.update()                           # same file back: all duplicates
+assert any("Imported 0 entries from OttoVault XML" in m and "NO AI access" in m for m in shown), shown
+assert len(a.vault.list_entries()) == n_before and a.vault.approved_count() == 0
+open(xml_out, "w").write("<ottovault><entry><title>FromXml</title><password>xp</password></entry></ottovault>")
+shown.clear(); a.do_import_xml(); a.update()
+a.search_var.set("fromxml"); a.update(); assert len(a.tree.get_children()) == 1
+a.search_var.set("")
+open(xml_out, "w").write("<!DOCTYPE x><ottovault/>")
+shown.clear(); a.do_import_xml(); a.update()
+assert any("DOCTYPE" in m for m in shown), shown
+A.PasswordPrompt = A.PromptReal
+os.remove(xml_out)
+print("xml GUI OK")
+
 # auto-type flow with mocked SendInput + short countdown
 A.AUTOTYPE_COUNTDOWN = 1
 a.search_var.set("")

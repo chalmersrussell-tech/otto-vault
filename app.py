@@ -467,6 +467,8 @@ class App(tk.Tk):
         m = tk.Menu(self)
         fm = tk.Menu(m, tearoff=0)
         fm.add_command(label="Import from CSV...", command=self.do_import)
+        fm.add_command(label="Import from XML...", command=self.do_import_xml)
+        fm.add_command(label="Export to XML (not encrypted)...", command=self.do_export_xml)
         fm.add_command(label="Export encrypted backup...", command=self.do_export)
         fm.add_command(label="AI access log...", command=self.show_otto_log)
         fm.add_separator()
@@ -857,6 +859,71 @@ class App(tk.Tk):
             "Imported %d entries (%d duplicates skipped).\n\n"
             "The CSV file you imported contains your passwords in PLAIN TEXT. "
             "Delete it now (and empty the Recycle Bin)." % (added, skipped))
+
+    def do_import_xml(self):
+        p = filedialog.askopenfilename(
+            title="Choose an XML file (OttoVault or KeePass 2.x export)",
+            filetypes=[("XML files", "*.xml"), ("All files", "*.*")])
+        if not p:
+            return
+        try:
+            added, skipped = self.vault.import_xml(p)
+        except V.VaultError as exc:
+            messagebox.showerror(APP_NAME, str(exc))
+            return
+        self.refresh_list()
+        r = self.vault.last_xml_report
+        extra = ""
+        if r["invalid"]:
+            extra += "\n%d entries were skipped because a field was too long or had forbidden characters." % r["invalid"]
+        if r["unsupported"]:
+            extra += "\n%d KeePass entries were skipped (password stored in KeePass's protected form)." % r["unsupported"]
+        messagebox.showinfo(
+            APP_NAME,
+            "Imported %d entries from %s (%d skipped, %d of them duplicates).%s\n\n"
+            "Imported entries have NO AI access - tick it yourself where wanted.\n\n"
+            "The XML file you imported contains your passwords in PLAIN TEXT. "
+            "Delete it now (and empty the Recycle Bin)."
+            % (added, r["format"], skipped, r["duplicates"], extra))
+
+    def do_export_xml(self):
+        if self.lockout.remaining() > 0:
+            self.status.set("Export is paused after too many wrong passwords - wait for the timer.")
+            return
+        if not messagebox.askyesno(
+                APP_NAME, "WARNING: an XML export is NOT encrypted.\n\n"
+                          "It will contain EVERY password in plain text, readable by anyone "
+                          "(or any program) who can open the file, and it may be copied by "
+                          "backup or cloud-sync software.\n\n"
+                          "Only continue if you need it for moving to another program, and "
+                          "delete the file afterwards.\n\nContinue?",
+                icon="warning", default="no"):
+            return
+        d = PasswordPrompt(self, "Confirm export", ["Master password:"],
+                           "Re-enter your master password to export your passwords as plain text.")
+        if not d.result:
+            return
+        if not self.vault.verify_master_password(d.result[0]):
+            self._wrong_password()
+            return
+        self.lockout.record_success()
+        p = filedialog.asksaveasfilename(
+            title="Save UNENCRYPTED XML export as", defaultextension=".xml",
+            initialfile="OttoVault-export-%s.xml" % time.strftime("%Y-%m-%d"),
+            filetypes=[("XML files", "*.xml"), ("All files", "*.*")])
+        if not p:
+            return
+        try:
+            written, skipped = self.vault.export_xml(p)
+        except Exception as exc:
+            messagebox.showerror(APP_NAME, "Could not write the export:\n%s" % exc)
+            return
+        messagebox.showwarning(
+            APP_NAME, "Exported %d entries to:\n%s\n\nThis file is NOT encrypted and contains "
+                      "your passwords in plain text. Delete it as soon as you have used it "
+                      "(and empty the Recycle Bin).%s"
+                      % (written, p, "\n\n%d entries could not be written (unsupported "
+                                      "characters)." % skipped if skipped else ""))
 
     def do_export(self):
         p = filedialog.asksaveasfilename(
