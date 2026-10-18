@@ -10,6 +10,10 @@ No cloud. No internet use. No account. No subscription. No tracking.
 Your passwords are stored in one encrypted file on this computer.
 Also: import from KeePass 1 (.kdb), KeePass 2 XML, OttoVault XML and CSV.
 
+AUTOSAVE: there is no separate "save the vault" step. Pressing Save on an
+entry (or adding, deleting or importing entries) writes the encrypted vault
+to disk right away.
+
 !!  YOUR MASTER PASSWORD CANNOT BE RECOVERED.  !!
 If you forget it, your passwords are gone. Nobody (not even the person who
 made this) can reset it. Pick one you will remember, and write it on paper

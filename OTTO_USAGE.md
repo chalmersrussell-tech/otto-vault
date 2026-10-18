@@ -2,6 +2,8 @@
 
 OttoVault is built so an AI assistant can help you with logins, **with your per-entry permission**: for a service you approve, the assistant can retrieve its username and password (`otto_get.py`) and use or paste them for you, and it can add new logins to your vault (`otto_add.py`, below). It never sees your master password, you can revoke access at any time, and every release is logged. Read the security notes at the end before enabling it.
 
+No separate "save vault" step: pressing Save on an entry (or adding, deleting or importing, including a login added by an AI assistant) writes the encrypted vault to disk right away.
+
 # Part 1 - AI adds a login: the inbox (`otto_add.py`)
 
 The inbox lets a helper program or person leave you a **new** entry **without

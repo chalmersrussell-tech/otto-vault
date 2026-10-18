@@ -16,6 +16,7 @@
 ## Also
 - **Free, local, encrypted.** One encrypted file on your PC (Argon2id or Scrypt key derivation + AES-256-GCM, vetted libraries only). No account, no subscription, no cloud, no telemetry, no network calls.
 - **A normal, simple password manager too:** add/edit/delete/search, copy with auto-clearing clipboard, password generator, auto-lock, auto-type login, encrypted backup/restore.
+- **Saves automatically.** There is no separate "save the vault" step and no File > Save: pressing Save on an entry (or adding, deleting or importing entries, or an AI-added login arriving) writes the encrypted vault to disk right away (atomic write, with a `.bak` backup copy of the previous version).
 - **Bring your passwords with you:** import from **KeePass 1 (`.kdb`)** databases directly, **KeePass 2.x XML**, OttoVault XML and **CSV**.
 
 ## Principles
